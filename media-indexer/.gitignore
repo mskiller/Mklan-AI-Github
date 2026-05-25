@@ -1,0 +1,54 @@
+# ── Environment ───────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.eggs/
+
+# ── Next.js / Node ────────────────────────────────────────────
+frontend/.next/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Runtime storage (user data, not code) ─────────────────────
+storage/previews/cache/
+storage/previews/deepzoom/
+storage/uploads/
+# Keep storage/empty/.gitkeep and storage/previews/.gitkeep for dir structure
+
+# ── OS / Editor ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Misc ──────────────────────────────────────────────────────
+*.log
+*.sqlite
+*.db
+.pytest_cache/
+backend/pytest-cache-files-*/
+backend/tests/.tmp-platform-tests/
+infra/docker-compose.override.yml
+
+# ── Generated (auto-synced, do not commit) ───────────────────
+backend/generated/addon-manifest-registry.json
+frontend/generated/addon-manifest-registry.json

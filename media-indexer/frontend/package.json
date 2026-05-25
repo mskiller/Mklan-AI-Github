@@ -1,0 +1,24 @@
+{
+  "name": "media-indexer-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0 --port 3000",
+    "build": "next build",
+    "start": "next start --hostname 0.0.0.0 --port 3000"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.4.3",
+    "next": "15.2.0",
+    "openseadragon": "^6.0.2",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.4",
+    "@types/react": "19.0.8",
+    "@types/react-dom": "19.0.3",
+    "playwright": "^1.60.0",
+    "typescript": "5.8.2"
+  }
+}

@@ -1,0 +1,22 @@
+id = "collections"
+name = "Collections"
+version = "1.0.0"
+description = "Manual named groups of assets."
+platform_api_version = "1"
+kind = "builtin"
+enabled_by_default = true
+permissions = ["collections.read", "collections.write"]
+
+[contributions]
+backend_router = "media_indexer_backend.api.routes.collections:router"
+api_mount = "/modules/collections"
+user_mount = "/collections"
+admin_mount = "/admin/modules/collections"
+nav_label = "Collections"
+nav_href = "/collections"
+nav_order = 70
+user_visible = true
+admin_visible = true
+
+[settings]
+fields = []

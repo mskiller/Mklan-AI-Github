@@ -1,0 +1,40 @@
+id = "smart_albums"
+name = "Smart Albums"
+version = "1.0.0"
+description = "Rule-based and suggested smart albums."
+platform_api_version = "1"
+kind = "builtin"
+enabled_by_default = true
+permissions = ["smart_albums.read", "smart_albums.write"]
+
+[contributions]
+backend_router = "media_indexer_backend.api.routes.smart_albums:router"
+api_mount = "/modules/smart_albums"
+user_mount = "/smart-albums"
+admin_mount = "/admin/modules/smart_albums"
+nav_label = "My Smart Albums"
+nav_href = "/smart-albums"
+nav_order = 60
+user_visible = true
+admin_visible = true
+
+[[settings.fields]]
+key = "smart_album_suggestion_min_events"
+label = "Suggestion minimum events"
+type = "integer"
+default = 5
+description = "Minimum curation events required before suggestions are generated."
+
+[[settings.fields]]
+key = "smart_album_suggestion_min_assets"
+label = "Suggestion minimum assets"
+type = "integer"
+default = 8
+description = "Minimum assets required before a suggested smart album is kept."
+
+[[settings.fields]]
+key = "smart_album_suggestion_lookback_days"
+label = "Suggestion lookback days"
+type = "integer"
+default = 90
+description = "Rolling lookback window used when generating suggestions."

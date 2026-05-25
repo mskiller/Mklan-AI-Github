@@ -1,0 +1,120 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-media_indexer}
+      POSTGRES_USER: ${POSTGRES_USER:-media_indexer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command: postgres -c max_connections=100 -c shared_buffers=256MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-media_indexer} -d ${POSTGRES_DB:-media_indexer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ..
+      dockerfile: infra/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://media_indexer:change-me@db:5432/media_indexer}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      PREVIEW_ROOT: ${PREVIEW_ROOT:-/workspace/storage/previews}
+      ALLOWED_SOURCE_ROOTS: ${ALLOWED_SOURCE_ROOTS:-/data/sources}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - ../storage/previews:/workspace/storage/previews
+      - ../storage/uploads:/data/sources/upload
+      - ../sample_media:/data/sources/sample:ro
+      # ── Add your own source folders below ──────────────────────────────────
+      # Duplicate these blocks for each folder you want to index.
+      # The target path must start with /data/sources/.
+      # Add the source in the UI using that target path, not the original host path.
+      # Then add the source via Admin → Sources in the UI.
+      #
+      # - type: bind
+      #   source: /path/to/your/photos      # absolute path on the host
+      #   target: /data/sources/photos      # how it appears inside the app
+      #   read_only: true
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/worker.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://media_indexer:change-me@db:5432/media_indexer}
+      PREVIEW_ROOT: ${PREVIEW_ROOT:-/workspace/storage/previews}
+      ALLOWED_SOURCE_ROOTS: ${ALLOWED_SOURCE_ROOTS:-/data/sources}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-5}
+      CLIP_ENABLED: ${CLIP_ENABLED:-true}
+      CLIP_MODEL_ID: ${CLIP_MODEL_ID:-openai/clip-vit-base-patch32}
+      CLIP_DEVICE: ${CLIP_DEVICE:-cpu}
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    volumes:
+      - ../storage/previews:/workspace/storage/previews
+      - ../storage/uploads:/data/sources/upload:ro
+      - ../sample_media:/data/sources/sample:ro
+      - hf_cache:/root/.cache/huggingface
+      # ── Mirror the same source bind mounts as the backend service ──────────
+      # The source path you create in the UI must match this container target path.
+      #
+      # - type: bind
+      #   source: /path/to/your/photos
+      #   target: /data/sources/photos
+      #   read_only: true
+   
+  frontend:
+    build:
+      context: ..
+      dockerfile: infra/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
+        INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://backend:8000}
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
+      INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://backend:8000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+
+volumes:
+  postgres_data:
+  hf_cache:

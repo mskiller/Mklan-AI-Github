@@ -1,0 +1,138 @@
+/* =============================================================
+   mklanlocal UI fixes — paste into your globals.css
+   (or import this file from your layout)
+   ============================================================= */
+
+/* -----------------------------------------------------------
+   FIX 1: Back button — mobile topbar spacing
+   ----------------------------------------------------------- */
+.mobile-topbar {
+  /* Ensure back button fits alongside menu button */
+  gap: 0.4rem;
+}
+
+.mobile-back-btn {
+  /* Hide on very small screens if needed; adjust breakpoint to taste */
+  display: none;
+}
+
+@media (min-width: 380px) {
+  .mobile-back-btn {
+    display: inline-flex;
+  }
+}
+
+/* -----------------------------------------------------------
+   FIX 2: Gallery bleed over Indexed Controls panel
+   The root cause is the gallery flex child not having min-width:0.
+   This covers any layout where .content holds a flex row with
+   a sidebar controls panel + a gallery column.
+   ----------------------------------------------------------- */
+
+/* If your browse-indexed layout is a flex row: */
+.indexed-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.indexed-controls {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2; /* sit above gallery */
+}
+
+.indexed-gallery-col {
+  flex: 1 1 0;
+  min-width: 0;      /* ← THE critical fix: prevents flex child overflow */
+  overflow: hidden;
+}
+
+/* Fallback: apply globally to all justified-gallery instances */
+.justified-gallery {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+/* -----------------------------------------------------------
+   FIX 3: Scan Jobs — no additional CSS needed
+   (see scan-jobs-controls.tsx component)
+   ----------------------------------------------------------- */
+
+/* -----------------------------------------------------------
+   FIX 4: Collection remove button — no additional CSS needed
+   (handled inline in asset-card.tsx)
+   ----------------------------------------------------------- */
+
+/* -----------------------------------------------------------
+   FIX 5: Mobile image viewer — image stage fills available height,
+   BottomSheet sits over it without collapsing the image.
+   ----------------------------------------------------------- */
+
+/* The mobile overlay wrapper (your asset detail / explorer page) */
+.mobile-image-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;      /* dynamic viewport height — accounts for browser chrome */
+  overflow: hidden;
+}
+
+/* Stage shell must fill remaining space */
+.interactive-image-stage-shell {
+  flex: 1 1 0;
+  min-height: 0;       /* ← prevents collapse inside flex column */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.interactive-image-stage {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  touch-action: none;
+}
+
+/* BottomSheet in peekable mode: only shows a slim bar by default */
+.bottom-sheet-peekable {
+  /* Show just the handle + title — roughly 4.5rem tall */
+  max-height: 4.5rem;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+
+.bottom-sheet-peekable.bottom-sheet-expanded {
+  /* Expand to ~70% of screen when the user taps "More" */
+  max-height: 70dvh;
+  overflow-y: auto;
+}
+
+/* When peekable and NOT expanded, the backdrop is invisible/non-blocking */
+.bottom-sheet-peekable:not(.bottom-sheet-expanded) + .bottom-sheet-backdrop,
+.bottom-sheet-backdrop[style*="pointer-events: none"] {
+  pointer-events: none !important;
+}
+
+/* Explorer overlay — make sure it fills the screen as a flex column */
+.explorer-overlay,
+.image-explorer-overlay {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* The toolbar row (Previous / Next / Close / Info / Fit / 100%) */
+.explorer-toolbar {
+  flex-shrink: 0;
+}
+
+/* Image area grows to fill space between toolbars */
+.explorer-image-area {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}

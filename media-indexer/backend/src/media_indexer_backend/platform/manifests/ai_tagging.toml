@@ -1,0 +1,45 @@
+id = "ai_tagging"
+name = "AI Tagging"
+version = "1.0.0"
+description = "Tagging, captions, OCR, and provider review surfaces."
+platform_api_version = "1"
+kind = "builtin"
+enabled_by_default = true
+permissions = ["ai_tagging.read", "ai_tagging.write"]
+
+[contributions]
+api_mount = "/modules/ai_tagging"
+user_mount = "/modules/ai_tagging"
+admin_mount = "/admin/modules/ai_tagging"
+admin_nav_label = "AI Tagging"
+admin_nav_href = "/admin/modules/ai_tagging"
+admin_nav_order = 20
+admin_visible = true
+
+[[settings.fields]]
+key = "clip_enabled"
+label = "Enable CLIP vocabulary"
+type = "boolean"
+default = true
+description = "Allows CLIP-based vocabulary suggestions and embeddings."
+
+[[settings.fields]]
+key = "image_tagging_enabled"
+label = "Enable image tagging"
+type = "boolean"
+default = true
+description = "Allows WD tagger providers to generate tag suggestions."
+
+[[settings.fields]]
+key = "caption_enabled"
+label = "Enable captions"
+type = "boolean"
+default = true
+description = "Allows caption generation during image enrichment."
+
+[[settings.fields]]
+key = "ocr_enabled"
+label = "Enable OCR"
+type = "boolean"
+default = true
+description = "Allows OCR extraction during image enrichment."

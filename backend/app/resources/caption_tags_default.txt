@@ -1,0 +1,235 @@
+# Default SDXL LoRA candidate tags for CLIP tag scoring.
+# One candidate tag per line. Custom vocabularies can be mounted and selected
+# with STUDIO_CAPTION_CLIP_TAGS_PATH.
+1girl
+1boy
+woman
+man
+person
+girl
+boy
+solo
+duo
+group
+portrait
+close-up
+upper body
+full body
+cowboy shot
+standing
+sitting
+kneeling
+lying down
+walking
+running
+dancing
+singing
+looking at viewer
+looking away
+smile
+serious expression
+blush
+open mouth
+closed mouth
+long hair
+short hair
+medium hair
+bangs
+twintails
+ponytail
+braid
+wavy hair
+straight hair
+pink hair
+blonde hair
+black hair
+brown hair
+white hair
+blue hair
+red hair
+green hair
+purple hair
+school uniform
+dress
+skirt
+shirt
+t-shirt
+blouse
+jacket
+coat
+hoodie
+sweater
+cardigan
+suit
+tie
+bow
+ribbon
+hat
+cap
+gloves
+boots
+sneakers
+high heels
+stockings
+thigh highs
+swimsuit
+bikini
+lingerie
+armor
+kimono
+yukata
+idol outfit
+magical girl outfit
+maid outfit
+cosplay
+fashion model
+streetwear
+gothic fashion
+lolita fashion
+cyberpunk fashion
+red dress
+black dress
+white dress
+blue dress
+red shoes
+black shoes
+white shoes
+handbag
+jewelry
+necklace
+earrings
+makeup
+red lipstick
+indoors
+outdoors
+bedroom
+classroom
+studio
+stage
+subway car
+train station
+city street
+alley
+rooftop
+park
+forest
+beach
+cafe
+library
+office
+bed
+sofa
+chair
+table
+window
+door
+mirror
+stairs
+sky
+clouds
+sunset
+night
+rain
+snow
+neon lighting
+soft lighting
+dramatic lighting
+backlighting
+rim light
+spotlight
+natural light
+cinematic lighting
+warm light
+cool light
+high contrast
+low contrast
+depth of field
+bokeh
+wide angle
+telephoto
+low angle
+high angle
+dynamic angle
+front view
+side view
+back view
+profile
+anime style
+manga style
+illustration
+digital art
+realistic
+photorealistic
+3d render
+oil painting
+watercolor
+sketch
+line art
+pixel art
+comic style
+fantasy
+sci-fi
+cyberpunk
+steampunk
+modern
+vintage
+elegant
+cute
+beautiful
+dramatic
+moody
+colorful
+monochrome
+pastel colors
+vivid colors
+red theme
+blue theme
+green theme
+pink theme
+gold theme
+black background
+white background
+simple background
+detailed background
+sparkles
+hearts
+flowers
+weapon
+sword
+gun
+microphone
+guitar
+book
+phone
+camera
+food
+drink
+vehicle
+car
+train
+animal ears
+wings
+horns
+tail
+glowing eyes
+tattoo
+scar
+freckles
+muscular
+slim
+curvy
+child
+teenager
+adult
+elderly
+hands on hips
+arms crossed
+peace sign
+waving
+holding object
+reaching out
+from above
+from below
+cropped
+centered composition
+rule of thirds

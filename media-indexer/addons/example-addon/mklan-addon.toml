@@ -1,0 +1,34 @@
+id = "hello_world"
+name = "Hello World Addon"
+version = "0.1.0"
+description = "Minimal addon template showing the modular platform contract."
+platform_api_version = "1"
+enabled_by_default = false
+permissions = ["hello_world.read"]
+dependencies = []
+
+[entrypoints]
+backend = "mklan_hello_world.backend"
+worker = "mklan_hello_world.worker"
+frontend = "mklan-hello-world"
+migrations = "alembic"
+
+[contributions]
+api_mount = "/modules/hello_world"
+user_mount = "/modules/hello_world"
+admin_mount = "/admin/modules/hello_world"
+nav_label = "Hello World"
+nav_href = "/modules/hello_world"
+nav_order = 200
+admin_nav_label = "Hello World"
+admin_nav_href = "/admin/modules/hello_world"
+admin_nav_order = 200
+user_visible = true
+admin_visible = true
+
+[[settings.fields]]
+key = "sample_enabled"
+label = "Enable sample behavior"
+type = "boolean"
+default = true
+description = "Example module-scoped setting exposed in the admin console."

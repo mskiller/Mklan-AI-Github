@@ -1,0 +1,12 @@
+# Installed addon lock file.
+# Each addon entry points at a checked-out manifest inside this repo (submodule, vendored folder, or synced checkout).
+# After editing this file, run:
+#   python scripts/sync-addons
+
+addons = []
+
+# [[addons]]
+# id = "hello_world"
+# version = "0.1.0"
+# source_ref = "https://github.com/example/mklan-hello-world.git#v0.1.0"
+# manifest_path = "addons/example-addon/mklan-addon.toml"

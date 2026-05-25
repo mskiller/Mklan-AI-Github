@@ -1,0 +1,21 @@
+id = "geo"
+name = "Geo"
+version = "1.0.0"
+description = "Map and GPS-aware browsing surfaces."
+platform_api_version = "1"
+kind = "builtin"
+enabled_by_default = true
+permissions = ["geo.read"]
+
+[contributions]
+api_mount = "/modules/geo"
+user_mount = "/map"
+admin_mount = "/admin/modules/geo"
+nav_label = "Map"
+nav_href = "/map"
+nav_order = 40
+user_visible = true
+admin_visible = true
+
+[settings]
+fields = []

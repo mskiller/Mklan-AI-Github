@@ -1,0 +1,26 @@
+id = "people"
+name = "People"
+version = "1.0.0"
+description = "Face detection, clustering, and people browsing."
+platform_api_version = "1"
+kind = "builtin"
+enabled_by_default = true
+permissions = ["people.read", "people.write"]
+
+[contributions]
+backend_router = "media_indexer_backend.api.routes.people:router"
+api_mount = "/modules/people"
+user_mount = "/people"
+admin_mount = "/admin/modules/people"
+nav_label = "People"
+nav_href = "/people"
+nav_order = 50
+user_visible = true
+admin_visible = true
+
+[[settings.fields]]
+key = "face_detection_enabled"
+label = "Enable face detection"
+type = "boolean"
+default = false
+description = "Controls worker-side face detection and clustering."
