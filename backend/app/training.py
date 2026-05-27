@@ -39,8 +39,11 @@ RUNS_ROOT.mkdir(parents=True, exist_ok=True)
 TRAINING_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 TRAINING_JOB_TYPES = {
+    "sd15_lora": "training.sd15_lora",
     "sdxl_lora": "training.sdxl_lora",
+    "sdxl_pony_lora": "training.sdxl_pony_lora",
     "sdxl_finetune": "training.sdxl_finetune",
+    "flux_lora": "training.flux_lora",
     "anima_lora": "training.anima_lora",
     "z_image_lora": "training.z_image_lora",
 }
@@ -67,6 +70,49 @@ CAPTION_CLIP_MODELS = {
     "openai/clip-vit-large-patch14": "OpenAI CLIP ViT-L/14",
 }
 OPEN_CLIP_MODEL_IDS = {"laion/CLIP-ViT-B-32-laion2B-s34B-b79K"}
+
+MODEL_FAMILY_PROFILES: dict[str, dict[str, Any]] = {
+    "sd15": {
+        "id": "sd15",
+        "label": "SD 1.5",
+        "default_preset": "sd15_lora",
+        "model_root": "SD15",
+        "resolution": 768,
+        "caption_style": "sdxl_tags",
+        "trainer": "kohya-ss sd-scripts",
+        "notes": "Classic LoRA stack for SD 1.5 checkpoints.",
+    },
+    "sdxl": {
+        "id": "sdxl",
+        "label": "SDXL",
+        "default_preset": "sdxl_lora",
+        "model_root": "Base",
+        "resolution": 1024,
+        "caption_style": "sdxl_tags",
+        "trainer": "kohya-ss sd-scripts",
+        "notes": "Default SDXL LoRA path.",
+    },
+    "sdxl_pony": {
+        "id": "sdxl_pony",
+        "label": "SDXL Pony",
+        "default_preset": "sdxl_pony_lora",
+        "model_root": "Pony",
+        "resolution": 1024,
+        "caption_style": "pony_tags",
+        "trainer": "kohya-ss sd-scripts",
+        "notes": "Pony-style tag captions and SDXL LoRA command defaults.",
+    },
+    "flux": {
+        "id": "flux",
+        "label": "Flux.1",
+        "default_preset": "flux_lora",
+        "model_root": "Flux",
+        "resolution": 1024,
+        "caption_style": "natural_language",
+        "trainer": "SimpleTuner / Flux external script",
+        "notes": "Natural-language captions and a guarded SimpleTuner-compatible command path.",
+    },
+}
 
 
 def utc_now_iso() -> str:
@@ -124,7 +170,8 @@ class CaptionScanRequest(BaseModel):
     overwrite: bool = False
     prepend_trigger: bool = True
     trigger_word: str | None = Field(default=None, max_length=80)
-    provider: Literal["auto", "local_blip", "koboldcpp_vlm", "clip_tagger", "filename_fallback"] = "auto"
+    provider: Literal["auto", "local_blip", "koboldcpp_vlm", "clip_tagger", "florence2", "filename_fallback"] = "auto"
+    caption_style: Literal["sdxl_tags", "pony_tags", "natural_language"] = "sdxl_tags"
     local_model_id: str | None = Field(default=None, max_length=240)
     clip_model_id: str | None = Field(default=None, max_length=240)
 
@@ -185,10 +232,12 @@ class TrainingModelFileRead(BaseModel):
     path: str
     size: int
     kind: Literal["base", "vae"]
+    family: str = "sdxl"
     modified_at: str
 
 
 class TrainingModelFilesResponse(BaseModel):
+    families: list[dict[str, Any]]
     base_models: list[TrainingModelFileRead]
     vae_models: list[TrainingModelFileRead]
     dry_run_forced: bool
@@ -204,7 +253,8 @@ class CaptionScanResponse(BaseModel):
 
 class TrainingRunRequest(BaseModel):
     dataset_id: str
-    preset: Literal["sdxl_lora", "sdxl_finetune", "anima_lora", "z_image_lora"] = "sdxl_lora"
+    model_family: Literal["sd15", "sdxl", "sdxl_pony", "flux"] = "sdxl"
+    preset: Literal["sd15_lora", "sdxl_lora", "sdxl_pony_lora", "sdxl_finetune", "flux_lora", "anima_lora", "z_image_lora"] = "sdxl_lora"
     output_name: str = Field(default="mklan-sdxl-lora", max_length=120)
     base_model: str = Field(default="", max_length=500)
     vae: str = Field(default="", max_length=500)
@@ -221,7 +271,7 @@ class TrainingRunRequest(BaseModel):
     flip_aug: bool = False
     learning_rate: float = Field(default=1e-4, gt=0, le=1)
     unet_lr: float = Field(default=5e-4, gt=0, le=1)
-    text_encoder_lr: float = Field(default=5e-5, gt=0, le=1)
+    text_encoder_lr: float = Field(default=5e-5, ge=0, le=1)
     lr_scheduler: str = Field(default="cosine", max_length=80)
     lr_scheduler_num_cycles: int = Field(default=3, ge=1, le=100)
     min_snr_gamma: float = Field(default=5, ge=0, le=100)
@@ -622,6 +672,25 @@ def _fallback_caption_from_filename(path: Path, max_words: int, context: str = "
     return _limit_caption_words(caption, max_words)
 
 
+def _caption_as_natural_language(caption: str, max_words: int) -> str:
+    cleaned = re.sub(r"\s+", " ", caption.replace("_", " ")).strip(" ,")
+    if not cleaned:
+        return "A training image."
+    if re.search(r"[.!?]$", cleaned) and "," not in cleaned:
+        return _limit_caption_words(cleaned, max_words)
+    tags = [part.strip(" .") for part in cleaned.split(",") if part.strip(" .")]
+    if not tags:
+        return _limit_caption_words(cleaned, max_words)
+    sentence = "A training image showing " + ", ".join(tags[:12]) + "."
+    return _limit_caption_words(sentence, max_words)
+
+
+def _apply_caption_style(caption: str, caption_style: str, max_words: int) -> str:
+    if caption_style == "natural_language":
+        return _caption_as_natural_language(caption, max_words)
+    return _limit_caption_words(caption, max_words)
+
+
 _CAPTIONING_MODEL_CACHE: dict[str, tuple[Any, Any, str] | Literal[False]] = {}
 _CAPTION_CLIP_MODEL_CACHE: dict[tuple[str, str], tuple[Any, ...] | Literal[False]] = {}
 _CAPTION_CLIP_TAG_CACHE: dict[str, tuple[float, list[str]]] = {}
@@ -900,11 +969,14 @@ def _normalize_caption_provider(provider: str = "auto") -> str:
         "vlm": "koboldcpp_vlm",
         "koboldcpp": "koboldcpp_vlm",
         "kobold": "koboldcpp_vlm",
+        "florence": "florence2",
+        "florence-2": "florence2",
+        "florence2": "florence2",
         "filename": "filename_fallback",
         "fallback": "filename_fallback",
     }
     provider = aliases.get(provider, provider)
-    if provider not in {"auto", "local_blip", "koboldcpp_vlm", "clip_tagger", "filename_fallback"}:
+    if provider not in {"auto", "local_blip", "koboldcpp_vlm", "clip_tagger", "florence2", "filename_fallback"}:
         return "auto"
     return provider
 
@@ -1051,6 +1123,82 @@ def _caption_image_with_vlm_result(path: Path, max_words: int) -> tuple[str | No
         }
 
 
+def _caption_florence_settings() -> dict[str, Any]:
+    return {
+        "url": os.getenv("STUDIO_FLORENCE_URL", "").strip().rstrip("/"),
+        "model_id": os.getenv("STUDIO_FLORENCE_MODEL_ID", "microsoft/Florence-2-base").strip() or "microsoft/Florence-2-base",
+        "device": os.getenv("STUDIO_FLORENCE_DEVICE", "auto").strip() or "auto",
+        "allow_download": os.getenv("STUDIO_FLORENCE_ALLOW_DOWNLOAD", "").strip().lower() in {"1", "true", "yes", "on"},
+        "timeout_s": int(os.getenv("STUDIO_FLORENCE_TIMEOUT_S", "120") or "120"),
+    }
+
+
+def _caption_florence_configured() -> bool:
+    return bool(_caption_florence_settings()["url"])
+
+
+def _caption_image_with_florence_result(path: Path, max_words: int) -> tuple[str | None, dict[str, Any]]:
+    settings = _caption_florence_settings()
+    url = str(settings["url"])
+    diagnostics = {
+        "source": "florence2",
+        "endpoint": url,
+        "model_id": settings["model_id"],
+        "device": settings["device"],
+        "download_allowed": settings["allow_download"],
+    }
+    if not url:
+        return None, {
+            **diagnostics,
+            "source": "florence_unconfigured",
+            "fallback_reason": "Florence-2 sidecar is not configured. Set STUDIO_FLORENCE_URL or choose Auto/filename fallback.",
+        }
+    try:
+        health = requests.get(f"{url}/health", timeout=3)
+        if health.status_code >= 400:
+            return None, {
+                **diagnostics,
+                "source": "florence_unavailable",
+                "fallback_reason": f"Florence-2 sidecar health check failed with HTTP {health.status_code}.",
+            }
+        health_payload = health.json()
+        if isinstance(health_payload, dict) and health_payload.get("ready") is False:
+            return None, {
+                **diagnostics,
+                "source": "florence_not_ready",
+                "fallback_reason": str(health_payload.get("detail") or "Florence-2 sidecar is not ready."),
+            }
+        media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+        image_base64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        response = requests.post(
+            f"{url}/caption",
+            json={
+                "image_base64": image_base64,
+                "media_type": media_type,
+                "max_words": max_words,
+                "model_id": settings["model_id"],
+                "task": "caption",
+            },
+            timeout=int(settings["timeout_s"]),
+        )
+        if response.status_code == 503:
+            detail = response.json().get("detail", "Florence-2 sidecar is not ready.")
+            return None, {**diagnostics, "source": "florence_not_ready", "fallback_reason": str(detail)}
+        response.raise_for_status()
+        raw = response.json()
+        caption = _clean_vlm_caption(str(raw.get("caption") or raw.get("text") or ""), max_words)
+        if not caption:
+            return None, {**diagnostics, "source": "florence_empty", "fallback_reason": "Florence-2 returned no readable caption."}
+        return caption, diagnostics
+    except Exception as exc:
+        return None, {
+            **diagnostics,
+            "source": "florence_error",
+            "fallback_reason": "Florence-2 sidecar captioning failed; fallback was used.",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def _caption_image_with_local_model_result(path: Path, max_words: int, model_id: str | None = None) -> tuple[str | None, dict[str, Any]]:
     requested_model = _caption_model_id(model_id)
     model_ref = _caption_local_model_ref(requested_model)
@@ -1148,6 +1296,11 @@ def _caption_image_with_source(
         attempts.append(info)
         return caption, info
 
+    def attempt_florence() -> tuple[str | None, dict[str, Any]]:
+        caption, info = _caption_image_with_florence_result(path, max_words)
+        attempts.append(info)
+        return caption, info
+
     if requested_provider == "local_blip":
         caption, info = attempt_local()
         if caption:
@@ -1160,8 +1313,16 @@ def _caption_image_with_source(
         caption, info = attempt_clip()
         if caption:
             return caption, {**info, "requested_provider": requested_provider, "attempts": attempts}
+    elif requested_provider == "florence2":
+        caption, info = attempt_florence()
+        if caption:
+            return caption, {**info, "requested_provider": requested_provider, "attempts": attempts}
+        raise RuntimeError(info.get("fallback_reason") or "Florence-2 sidecar is unavailable.")
     elif requested_provider == "auto":
-        for attempt in (attempt_local, attempt_vlm, attempt_clip):
+        auto_attempts = [attempt_local, attempt_vlm, attempt_clip]
+        if _caption_florence_configured():
+            auto_attempts.insert(0, attempt_florence)
+        for attempt in auto_attempts:
             caption, info = attempt()
             if caption:
                 return caption, {**info, "requested_provider": requested_provider, "attempts": attempts}
@@ -1207,25 +1368,47 @@ def _training_vae_model_dir() -> Path:
     return _case_matching_dir(_image_model_root(), "vae")
 
 
-def _training_model_read(path: Path, kind: Literal["base", "vae"]) -> TrainingModelFileRead:
+def _training_family_model_dir(family: str) -> Path:
+    profile = MODEL_FAMILY_PROFILES.get(family, MODEL_FAMILY_PROFILES["sdxl"])
+    return _case_matching_dir(_image_model_root(), str(profile["model_root"]))
+
+
+def _training_model_read(path: Path, kind: Literal["base", "vae"], family: str = "sdxl") -> TrainingModelFileRead:
     stat = path.stat()
     return TrainingModelFileRead(
         name=path.name,
         path=str(path),
         size=stat.st_size,
         kind=kind,
+        family=family,
         modified_at=datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
     )
 
 
-def _training_model_files(root: Path, kind: Literal["base", "vae"]) -> list[TrainingModelFileRead]:
+def _training_model_files(root: Path, kind: Literal["base", "vae"], family: str = "sdxl") -> list[TrainingModelFileRead]:
     if not root.exists():
         return []
     return [
-        _training_model_read(path, kind)
+        _training_model_read(path, kind, family)
         for path in sorted(root.glob("*.safetensors"), key=lambda item: item.name.lower())
         if path.is_file()
     ]
+
+
+def _all_training_base_models() -> list[TrainingModelFileRead]:
+    models: list[TrainingModelFileRead] = []
+    seen: set[str] = set()
+    for family in ("sdxl", "sdxl_pony", "flux", "sd15"):
+        for model in _training_model_files(_training_family_model_dir(family), "base", family):
+            if model.path in seen:
+                continue
+            seen.add(model.path)
+            models.append(model)
+    for model in _training_model_files(_image_model_root(), "base", "local"):
+        if model.path not in seen:
+            seen.add(model.path)
+            models.append(model)
+    return models
 
 
 def _find_model_by_name(file_name: str, roots: list[Path]) -> Path | None:
@@ -1267,7 +1450,12 @@ def _resolve_training_file_path(value: str, role: Literal["base", "vae"], *, req
             candidates.append(DATA / normalized)
             candidates.append(_image_model_root() / normalized)
 
-    roots = [_training_base_model_dir(), _training_vae_model_dir(), _image_model_root()]
+    roots = [
+        _training_base_model_dir(),
+        _training_vae_model_dir(),
+        *[_training_family_model_dir(family) for family in MODEL_FAMILY_PROFILES],
+        _image_model_root(),
+    ]
     for candidate in candidates:
         if candidate.exists():
             return str(candidate)
@@ -1283,13 +1471,19 @@ def _resolve_training_file_path(value: str, role: Literal["base", "vae"], *, req
 def list_training_model_files() -> TrainingModelFilesResponse:
     script_path = _trainer_root() / "sdxl_train_network.py"
     return TrainingModelFilesResponse(
-        base_models=_training_model_files(_training_base_model_dir(), "base"),
+        families=list(MODEL_FAMILY_PROFILES.values()),
+        base_models=_all_training_base_models(),
         vae_models=_training_model_files(_training_vae_model_dir(), "vae"),
         dry_run_forced=_truthy(os.getenv("STUDIO_TRAINING_DRY_RUN")),
         sd_scripts_root=str(_trainer_root()),
         sd_scripts_ready=script_path.exists(),
         accelerate_bin=os.getenv("STUDIO_ACCELERATE_BIN", "accelerate"),
     )
+
+
+@router.get("/model-families")
+def list_training_model_families() -> dict[str, Any]:
+    return {"families": list(MODEL_FAMILY_PROFILES.values())}
 
 
 def _caption_model_kind(model_dir: Path) -> str | None:
@@ -1362,6 +1556,17 @@ def list_caption_models() -> list[dict[str, Any]]:
                     "source": _caption_clip_model_source(model_id),
                 }
             )
+    florence = _caption_florence_settings()
+    models.append(
+        {
+            "id": florence["model_id"],
+            "label": "Florence-2 sidecar",
+            "provider": "florence2",
+            "path": florence["url"] or "STUDIO_FLORENCE_URL not configured",
+            "local": bool(florence["url"]),
+            "source": "sidecar",
+        }
+    )
     return models
 
 
@@ -1732,6 +1937,31 @@ def _extra_args(args: list[str], extra: dict[str, str | int | float | bool]) -> 
             args.extend([flag, str(value)])
 
 
+def _extra_arg_name(key: str) -> str:
+    return slugify(key).replace("-", "_")
+
+
+def _extra_arg_flag_enabled(extra: dict[str, str | int | float | bool], name: str) -> bool:
+    for key, value in extra.items():
+        if _extra_arg_name(key) != name:
+            continue
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    return False
+
+
+def _filtered_extra_args(
+    extra: dict[str, str | int | float | bool],
+    managed_flags: set[str],
+) -> dict[str, str | int | float | bool]:
+    if not managed_flags:
+        return extra
+    return {key: value for key, value in extra.items() if _extra_arg_name(key) not in managed_flags}
+
+
 def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPreview:
     metadata = _load_dataset(payload.dataset_id)
     config = build_dataset_config(payload.dataset_id, overrides=payload.model_dump())
@@ -1742,9 +1972,23 @@ def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPrevie
     accelerate_bin = os.getenv("STUDIO_ACCELERATE_BIN", "accelerate")
     scheduler = slugify(payload.lr_scheduler or "cosine", "cosine").replace("-", "_")
     optimizer_type = payload.optimizer_type.strip() or "Adafactor"
+    managed_extra_flags: set[str] = set()
+    effective_family = payload.model_family
+    if payload.preset == "sd15_lora":
+        effective_family = "sd15"
+    elif payload.preset == "sdxl_pony_lora":
+        effective_family = "sdxl_pony"
+    elif payload.preset == "flux_lora":
+        effective_family = "flux"
 
-    if payload.preset == "sdxl_lora":
-        script = sd_root / "sdxl_train_network.py"
+    if payload.preset in {"sd15_lora", "sdxl_lora", "sdxl_pony_lora"}:
+        train_unet_only = payload.text_encoder_lr <= 0 or _extra_arg_flag_enabled(payload.extra_args, "network_train_unet_only")
+        if _extra_arg_flag_enabled(payload.extra_args, "cache_text_encoder_outputs") and not train_unet_only:
+            raise RuntimeError(
+                "SDXL LoRA cannot cache text encoder outputs while training the text encoder. "
+                "Set Text Encoder LR to 0 or enable network_train_unet_only."
+            )
+        script = sd_root / ("train_network.py" if effective_family == "sd15" else "sdxl_train_network.py")
         command = [
             accelerate_bin,
             "launch",
@@ -1758,7 +2002,7 @@ def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPrevie
             "--output_dir",
             str(run_output_dir),
             "--output_name",
-            slugify(payload.output_name, "mklan-sdxl-lora"),
+            slugify(payload.output_name, f"mklan-{effective_family}-lora"),
             "--save_model_as",
             "safetensors",
             "--network_module",
@@ -1771,8 +2015,6 @@ def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPrevie
             str(payload.learning_rate),
             "--unet_lr",
             str(payload.unet_lr),
-            "--text_encoder_lr",
-            str(payload.text_encoder_lr),
             "--lr_scheduler",
             scheduler,
             "--lr_scheduler_num_cycles",
@@ -1787,9 +2029,6 @@ def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPrevie
             mixed_precision,
             "--gradient_checkpointing",
             "--cache_latents",
-            "--cache_text_encoder_outputs",
-            "--clip_skip",
-            str(payload.clip_skip),
             "--min_snr_gamma",
             str(payload.min_snr_gamma),
             "--noise_offset",
@@ -1797,6 +2036,13 @@ def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPrevie
             "--save_every_n_epochs",
             str(payload.save_every_n_epochs),
         ]
+        if effective_family != "flux":
+            command.extend(["--clip_skip", str(payload.clip_skip)])
+        if train_unet_only:
+            command.extend(["--network_train_unet_only", "--cache_text_encoder_outputs"])
+            managed_extra_flags.update({"network_train_unet_only", "cache_text_encoder_outputs"})
+        else:
+            command.extend(["--text_encoder_lr", str(payload.text_encoder_lr)])
         network_args = LORA_NETWORK_ARGS.get(payload.lora_type, [])
         if network_args:
             command.extend(["--network_args", *network_args])
@@ -1853,6 +2099,45 @@ def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPrevie
             command.append("--flip_aug")
         if payload.vae.strip():
             command.extend(["--vae", _resolve_training_file_path(payload.vae, "vae", required=False)])
+    elif payload.preset == "flux_lora":
+        model_ref = payload.model_components.get("transformer") or payload.model_components.get("flux_model") or payload.base_model.strip()
+        if not model_ref:
+            raise RuntimeError("Flux LoRA requires a Flux base model path or model_components.flux_model.")
+        simpletuner_root = Path(os.getenv("STUDIO_SIMPLETUNER_ROOT", "/app/trainers/SimpleTuner")).resolve(strict=False)
+        script_text = payload.model_components.get("train_script") or os.getenv("STUDIO_FLUX_TRAIN_SCRIPT", "") or str(simpletuner_root / "train.py")
+        script = Path(script_text).resolve(strict=False)
+        command = [
+            accelerate_bin,
+            "launch",
+            "--num_cpu_threads_per_process",
+            "1",
+            str(script),
+            "--model_family",
+            "flux",
+            "--pretrained_model_name_or_path",
+            model_ref,
+            "--dataset_config",
+            config.config_file,
+            "--output_dir",
+            str(run_output_dir),
+            "--output_name",
+            slugify(payload.output_name, "mklan-flux-lora"),
+            "--max_train_steps",
+            str(payload.max_train_steps),
+            "--learning_rate",
+            str(payload.learning_rate),
+            "--optimizer_type",
+            optimizer_type,
+            "--lr_scheduler",
+            scheduler,
+            "--mixed_precision",
+            mixed_precision,
+            "--gradient_checkpointing",
+            "--network_dim",
+            str(payload.network_dim),
+            "--network_alpha",
+            str(payload.network_alpha),
+        ]
     elif payload.preset == "anima_lora":
         required = ["dit", "text_encoder", "vae"]
         missing = [key for key in required if not payload.model_components.get(key)]
@@ -1911,7 +2196,7 @@ def build_training_command(payload: TrainingRunRequest) -> TrainingCommandPrevie
 
     if payload.sample_prompt.strip():
         command.extend(["--sample_prompts", payload.sample_prompt.strip()])
-    _extra_args(command, payload.extra_args)
+    _extra_args(command, _filtered_extra_args(payload.extra_args, managed_extra_flags))
 
     return TrainingCommandPreview(
         preset=payload.preset,
@@ -1941,9 +2226,7 @@ async def create_training_run(payload: TrainingRunRequest, request: Request) -> 
 
 
 def _list_jobs(manager: JobManager, prefix: str) -> list[dict[str, Any]]:
-    with manager._connect() as conn:
-        rows = conn.execute("SELECT * FROM jobs WHERE job_type LIKE ? ORDER BY created_at DESC LIMIT 80", (f"{prefix}%",)).fetchall()
-    return [manager._job_from_row(row) for row in rows]
+    return manager.list_jobs(limit=80, prefix=prefix)
 
 
 @router.get("/runs", response_model=list[JobRead])
@@ -2042,6 +2325,7 @@ async def run_caption_scan_job(job: dict[str, Any], manager: JobManager) -> dict
     model_count = 0
     vlm_count = 0
     clip_count = 0
+    florence_count = 0
     trigger_applied_count = 0
     errors: list[dict[str, str]] = []
     caption_sources: dict[str, int] = {}
@@ -2056,6 +2340,7 @@ async def run_caption_scan_job(job: dict[str, Any], manager: JobManager) -> dict
             "dataset_id": dataset_id,
             "total": len(items),
             "provider": payload.provider,
+            "caption_style": payload.caption_style,
             "local_model_id": payload.local_model_id,
             "clip_model_id": payload.clip_model_id,
         },
@@ -2078,6 +2363,7 @@ async def run_caption_scan_job(job: dict[str, Any], manager: JobManager) -> dict
                     local_model_id=payload.local_model_id,
                     clip_model_id=payload.clip_model_id,
                 )
+                caption = _apply_caption_style(caption, payload.caption_style, payload.max_words)
                 caption_source = str(source_info.get("source") or "filename_fallback")
                 caption_sources[caption_source] = caption_sources.get(caption_source, 0) + 1
                 if caption_source == "filename_fallback":
@@ -2090,6 +2376,8 @@ async def run_caption_scan_job(job: dict[str, Any], manager: JobManager) -> dict
                         vlm_count += 1
                     if caption_source == "clip_tagger":
                         clip_count += 1
+                    if caption_source == "florence2":
+                        florence_count += 1
                 if payload.prepend_trigger and trigger_word:
                     caption, trigger_changed = _prepend_trigger(caption, trigger_word, ", ")
                     if trigger_changed:
@@ -2114,8 +2402,10 @@ async def run_caption_scan_job(job: dict[str, Any], manager: JobManager) -> dict
                 "model_count": model_count,
                 "vlm_count": vlm_count,
                 "clip_count": clip_count,
+                "florence_count": florence_count,
                 "last_filename": item.filename,
                 "last_source": caption_source,
+                "caption_style": payload.caption_style,
             },
         )
 
@@ -2134,14 +2424,24 @@ async def run_caption_scan_job(job: dict[str, Any], manager: JobManager) -> dict
         "model_count": model_count,
         "vlm_count": vlm_count,
         "clip_count": clip_count,
+        "florence_count": florence_count,
         "provider": payload.provider,
+        "caption_style": payload.caption_style,
         "local_model_id": payload.local_model_id,
         "clip_model_id": payload.clip_model_id,
         "caption_sources": caption_sources,
         "model_used": (
             _caption_model_id(payload.local_model_id)
             if caption_sources.get("local_blip")
-            else (_caption_vlm_settings().get("model") if vlm_count else (_caption_clip_model_id(payload.clip_model_id) if clip_count else None))
+            else (
+                _caption_vlm_settings().get("model")
+                if vlm_count
+                else (
+                    _caption_clip_model_id(payload.clip_model_id)
+                    if clip_count
+                    else (_caption_florence_settings().get("model_id") if florence_count else None)
+                )
+            )
         ),
         "download_allowed": _caption_download_allowed(),
         "clip_download_allowed": _caption_clip_allow_download(),

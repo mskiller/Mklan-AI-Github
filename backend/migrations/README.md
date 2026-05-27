@@ -18,6 +18,11 @@ code.
 Media Indexer uses PostgreSQL under `data/postgres/` when the media-indexer
 Docker profile is enabled.
 
+The V2 Phase 1 Studio core database uses a separate PostgreSQL/pgvector service
+for shared platform tables only: jobs, job events, generated assets, and audit
+events. Wildcards, Movie, and Cards remain on their existing SQLite databases
+until their cutover is explicitly enabled in a later phase.
+
 ## Preview A Copy
 
 Run dry-run mode before copying data:
@@ -26,7 +31,12 @@ Run dry-run mode before copying data:
 cd backend
 python -m migrations.migrate_wildcard --dry-run
 python -m migrations.migrate_movie --dry-run
+python -m migrations.dry_run_core_postgres --data-root ..\data
 ```
+
+`dry_run_core_postgres` prints source row counts and target platform table
+counts. It does not write to source SQLite databases and it does not cut modules
+over to Postgres.
 
 ## Run A Copy
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "../../i18n";
 
 import {
   approveImageCandidate,
@@ -243,7 +244,7 @@ function CharacterEditor({
             step="0.1"
             min={0}
             max={1}
-            value={draft.talkativeness ?? ""}
+            value={draft.talkativeness != null ? Number(draft.talkativeness.toFixed(2)) : ""}
             disabled={!editable}
             onChange={(e) =>
               setDraft({
@@ -796,6 +797,7 @@ function LoreEditor({
 }
 
 function App() {
+  const { t } = useTranslation();
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [projectScope, setProjectScope] = useState<ProjectScope>("active");
   const [project, setProject] = useState<Project | null>(null);
@@ -1957,8 +1959,13 @@ function App() {
                     <button className="ghost-button" disabled={!isProjectEditable || loading || Boolean(scenarioWorldStatus)} onClick={() => void handleGenerateScenarioPrompt()}>
                       {scenarioWorldStatus === "Generating prompt..." ? "Generating..." : "Generate World Prompt"}
                     </button>
-                    <button className="ghost-button" disabled={!isProjectEditable || loading || Boolean(scenarioWorldStatus) || !scenarioWorldDraft.prompt.trim()} onClick={() => void handleGenerateScenarioImage()}>
-                      {scenarioWorldStatus === "Generating image..." ? "Generating..." : "Generate World Image"}
+                    <button 
+                      className="ghost-button" 
+                      disabled={!isProjectEditable || loading || Boolean(scenarioWorldStatus) || !scenarioWorldDraft.prompt.trim()} 
+                      onClick={() => void handleGenerateScenarioImage()}
+                      title={!isProjectEditable ? "Project locked" : !scenarioWorldDraft.prompt.trim() ? "Prompt is empty" : loading || Boolean(scenarioWorldStatus) ? "Busy" : "Generate World Image"}
+                    >
+                      {scenarioWorldStatus === "Generating image..." ? "Generating..." : t("cards.generate_world_image")}
                     </button>
                     <button className="ghost-button" disabled={!isProjectEditable || loading} onClick={() => void handleGenerateScenario()}>
                       Regenerate Scenario
@@ -2204,7 +2211,7 @@ function App() {
                           min={0}
                           max={1}
                           disabled={!isProjectEditable}
-                          value={project.gm_card_profile.talkativeness ?? ""}
+                          value={project.gm_card_profile.talkativeness != null ? Number(project.gm_card_profile.talkativeness.toFixed(2)) : ""}
                           onChange={(e) =>
                             setProject({
                               ...project,

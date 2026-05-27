@@ -40,17 +40,28 @@ class SharedVaultService:
         source_id = str(payload.get("source_id") or payload.get("id") or uuid.uuid4())
         with self.database.connect() as connection:
             existing = connection.execute(
-                "SELECT id, created_at FROM shared_character_vault WHERE source_module = ? AND source_id = ?",
+                "SELECT id, created_at FROM shared_character_vault WHERE source_module = %s AND source_id = %s",
                 (source_module, source_id),
             ).fetchone()
             vault_id = existing["id"] if existing else str(uuid.uuid4())
             created_at = existing["created_at"] if existing else now
             connection.execute(
                 """
-                INSERT OR REPLACE INTO shared_character_vault (
+                INSERT INTO shared_character_vault (
                     id, source_module, source_id, name, description, personality, role_summary,
-                    prompt_tags_json, avatar_path, source_metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_tags_json, avatar_path, source_metadata_json, created_at, updated_at, workspace_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
+                ON CONFLICT (id) DO UPDATE SET
+                    source_module = EXCLUDED.source_module,
+                    source_id = EXCLUDED.source_id,
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    personality = EXCLUDED.personality,
+                    role_summary = EXCLUDED.role_summary,
+                    prompt_tags_json = EXCLUDED.prompt_tags_json,
+                    avatar_path = EXCLUDED.avatar_path,
+                    source_metadata_json = EXCLUDED.source_metadata_json,
+                    updated_at = EXCLUDED.updated_at
                 """,
                 (
                     vault_id,
@@ -75,17 +86,25 @@ class SharedVaultService:
         source_id = str(payload.get("source_id") or payload.get("id") or uuid.uuid4())
         with self.database.connect() as connection:
             existing = connection.execute(
-                "SELECT id, created_at FROM shared_lore_vault WHERE source_module = ? AND source_id = ?",
+                "SELECT id, created_at FROM shared_lore_vault WHERE source_module = %s AND source_id = %s",
                 (source_module, source_id),
             ).fetchone()
             vault_id = existing["id"] if existing else str(uuid.uuid4())
             created_at = existing["created_at"] if existing else now
             connection.execute(
                 """
-                INSERT OR REPLACE INTO shared_lore_vault (
+                INSERT INTO shared_lore_vault (
                     id, source_module, source_id, name, keys_json, content,
-                    source_metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_metadata_json, created_at, updated_at, workspace_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
+                ON CONFLICT (id) DO UPDATE SET
+                    source_module = EXCLUDED.source_module,
+                    source_id = EXCLUDED.source_id,
+                    name = EXCLUDED.name,
+                    keys_json = EXCLUDED.keys_json,
+                    content = EXCLUDED.content,
+                    source_metadata_json = EXCLUDED.source_metadata_json,
+                    updated_at = EXCLUDED.updated_at
                 """,
                 (
                     vault_id,
@@ -103,14 +122,14 @@ class SharedVaultService:
 
     def get_character(self, vault_id: str) -> dict[str, Any]:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM shared_character_vault WHERE id = ?", (vault_id,)).fetchone()
+            row = connection.execute("SELECT * FROM shared_character_vault WHERE id = %s", (vault_id,)).fetchone()
         if row is None:
             raise KeyError(vault_id)
         return self._character_from_row(row)
 
     def get_lore(self, vault_id: str) -> dict[str, Any]:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM shared_lore_vault WHERE id = ?", (vault_id,)).fetchone()
+            row = connection.execute("SELECT * FROM shared_lore_vault WHERE id = %s", (vault_id,)).fetchone()
         if row is None:
             raise KeyError(vault_id)
         return self._lore_from_row(row)

@@ -249,6 +249,22 @@ class ComfyUIClient:
             return []
         return [str(item) for item in payload]
 
+    def upload_image(self, image_bytes: bytes, filename: str) -> dict[str, Any]:
+        files = {"image": (filename, image_bytes, "image/png")}
+        data = {"overwrite": "true"}
+        response = self.session.post(f"{self.endpoint}/upload/image", files=files, data=data, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def list_controlnets(self) -> list[str]:
+        try:
+            payload = self._get_json("/models/controlnets", timeout=10)
+            if isinstance(payload, list):
+                return [str(item) for item in payload]
+        except Exception:
+            pass
+        return []
+
     def list_models(self, model_type: str) -> list[str]:
         safe_type = _comfy_key(model_type)
         if not safe_type:

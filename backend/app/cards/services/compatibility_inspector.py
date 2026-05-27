@@ -42,8 +42,8 @@ class CompatibilityInspector:
             connection.execute(
                 """
                 INSERT INTO compatibility_reports (
-                    id, project_id, status, critical_count, warning_count, report_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, project_id, status, critical_count, warning_count, report_json, created_at, workspace_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'default')
                 """,
                 (
                     str(uuid.uuid4()),

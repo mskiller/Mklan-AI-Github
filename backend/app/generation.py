@@ -77,6 +77,7 @@ class ImageGenerationRequest(BaseModel):
     batch_count: int = Field(default=1, ge=1, le=8)
     expand_wildcards: bool = True
     wildcard_seed: int | None = None
+    workflow_preset_id: str | None = Field(default=None, max_length=120)
     workflow_json: str | dict[str, Any] | None = None
     source_module: str = "generation"
 
@@ -347,25 +348,11 @@ def list_generation_jobs(request: Request) -> list[JobRead]:
     manager = getattr(request.app.state, "v2_jobs", None)
     if manager is None:
         raise HTTPException(status_code=503, detail="V2 job manager is not available.")
-    with manager._connect() as conn:
-        rows = conn.execute("SELECT * FROM jobs WHERE job_type LIKE 'generation.%' ORDER BY created_at DESC LIMIT 80").fetchall()
-    return [JobRead.model_validate(manager._job_from_row(row)) for row in rows]
+    return [JobRead.model_validate(job) for job in manager.list_jobs(limit=80, prefix="generation.")]
 
 
 def clear_generation_jobs(manager: JobManager, status: Literal["failed", "succeeded"]) -> int:
-    with manager._connect() as conn:
-        rows = conn.execute(
-            "SELECT id FROM jobs WHERE job_type LIKE 'generation.%' AND status = ?",
-            (status,),
-        ).fetchall()
-        job_ids = [str(row["id"]) for row in rows]
-        if not job_ids:
-            return 0
-        placeholders = ",".join("?" for _ in job_ids)
-        conn.execute(f"DELETE FROM job_events WHERE job_id IN ({placeholders})", job_ids)
-        conn.execute(f"DELETE FROM jobs WHERE id IN ({placeholders})", job_ids)
-        conn.commit()
-        return len(job_ids)
+    return manager.delete_terminal_jobs(status=status, prefix="generation.")
 
 
 @router.delete("/jobs", response_model=JobClearResponse)
@@ -447,8 +434,13 @@ async def _render_comfyui_image(
         checkpoints = await asyncio.to_thread(client.list_checkpoints)
         model_name = checkpoints[0] if checkpoints else ""
     seed = payload.seed + batch_index if payload.seed is not None else None
+    workflow_json: str | dict[str, Any] | None = payload.workflow_json
+    if workflow_json is None and payload.workflow_preset_id:
+        from app.v2.workflows import get_workflow_template
+
+        workflow_json = get_workflow_template(payload.workflow_preset_id)["workflow_json"]
     workflow, resolved_seed = build_workflow_from_generation(
-        workflow_json=payload.workflow_json if payload.workflow_json is not None else image_settings.get("workflow_json") or "",
+        workflow_json=workflow_json if workflow_json is not None else image_settings.get("workflow_json") or "",
         prompt=wildcard_preview.expanded_prompt,
         negative_prompt=payload.negative_prompt,
         model=model_name,
@@ -495,6 +487,7 @@ async def _render_comfyui_image(
         "wildcards": wildcard_preview.model_dump(),
         "comfyui_prompt_id": render_result.prompt_id,
         "comfyui_output": render_result.output,
+        "workflow_preset_id": payload.workflow_preset_id,
         "job_id": job_id,
         "created_at": utc_now_iso(),
     }

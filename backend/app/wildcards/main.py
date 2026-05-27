@@ -19,6 +19,18 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Query
+
+
+def parse_db_json(val: Any, default: Any = None) -> Any:
+    if val is None:
+        return default if default is not None else {}
+    if isinstance(val, (dict, list)):
+        return val
+    try:
+        return json.loads(val)
+    except Exception:
+        return default if default is not None else {}
+
 from pydantic import BaseModel, Field
 
 # Import Pydantic models from schemas module
@@ -44,12 +56,12 @@ from .config import WILDCARD_DATA_DIR as DATA_DIR
 from .config import WILDCARD_DB as DB_PATH
 from .config import EXPORT_ROOT
 
-WILDCARD_REF_RE = re.compile(r"__([^_\n][^_\n]*?)__")
+WILDCARD_REF_RE = re.compile(r"__([^_\n][^_\n]*%s)__")
 LORA_RE = re.compile(r"<lora:[^>]+>", re.IGNORECASE)
-WEIGHTED_DYNAMIC_RE = re.compile(r"\{\s*\d+(?:\.\d+)?::")
-MULTI_SELECT_RE = re.compile(r"\{\s*-?\d+(?:-\d+)?\$\$")
+WEIGHTED_DYNAMIC_RE = re.compile(r"\{\s*\d+(%s:\.\d+)%s::")
+MULTI_SELECT_RE = re.compile(r"\{\s*-%s\d+(%s:-\d+)%s\$\$")
 COMMENT_RE = re.compile(r"^\s*#")
-NEGATIVE_PROMPT_RE = re.compile(r"\b(?:negative prompt|negative|neg prompt|negatives?)\s*:", re.IGNORECASE)
+NEGATIVE_PROMPT_RE = re.compile(r"\b(%s:negative prompt|negative|neg prompt|negatives%s)\s*:", re.IGNORECASE)
 
 CATEGORY_RULES: dict[str, tuple[str, ...]] = {
     "copyright": (
@@ -229,16 +241,16 @@ Use concise comma-separated tags unless the task explicitly asks for JSON. Keep 
 
 
 def seed_taxonomy_defaults(conn: sqlite3.Connection) -> None:
-    existing = conn.execute("SELECT COUNT(*) AS count FROM taxonomy_rules").fetchone()["count"]
+    existing = conn.execute("SELECT COUNT(*) AS count FROM wildcard_taxonomy_rules").fetchone()["count"]
     if existing:
         return
     now = utc_now()
-    conn.executemany(
-        "INSERT OR IGNORE INTO taxonomy_rules(category, keyword, enabled, updated_at) VALUES (?, ?, 1, ?)",
+    conn.cursor().executemany(
+        "INSERT INTO wildcard_taxonomy_rules(category, keyword, enabled, updated_at, workspace_id) VALUES (%s, %s, 1, %s, 'default') ON CONFLICT DO NOTHING",
         [(category, keyword, now) for category, keywords in CATEGORY_RULES.items() for keyword in keywords],
     )
     conn.execute(
-        "INSERT OR REPLACE INTO taxonomy_meta(key, value, updated_at) VALUES ('version', ?, ?)",
+        "INSERT INTO wildcard_taxonomy_meta(key, value, updated_at, workspace_id) VALUES ('version', %s, %s, 'default') ON CONFLICT (key, workspace_id) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
         (now, now),
     )
 
@@ -250,9 +262,9 @@ def taxonomy_rules_cached() -> dict[str, tuple[str, ...]]:
     try:
         with connect() as conn:
             rows = conn.execute(
-                "SELECT category, keyword FROM taxonomy_rules WHERE enabled = 1 ORDER BY category, keyword"
+                "SELECT category, keyword FROM wildcard_taxonomy_rules WHERE enabled = 1 ORDER BY category, keyword"
             ).fetchall()
-    except sqlite3.Error:
+    except Exception:
         return CATEGORY_RULES
     grouped: dict[str, list[str]] = defaultdict(list)
     for row in rows:
@@ -260,7 +272,11 @@ def taxonomy_rules_cached() -> dict[str, tuple[str, ...]]:
     return {category: tuple(keywords) for category, keywords in grouped.items()} or CATEGORY_RULES
 
 
-def connect() -> sqlite3.Connection:
+def connect():
+    from app.v2.core_db import connect_core_db
+    return connect_core_db(dict_rows=True)
+
+def _legacy_connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -271,213 +287,36 @@ def connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    with connect() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS source_files (
-                id INTEGER PRIMARY KEY,
-                original_path TEXT NOT NULL UNIQUE,
-                relative_path TEXT NOT NULL,
-                extension TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                sha256 TEXT NOT NULL,
-                last_modified TEXT NOT NULL,
-                wildcard_path TEXT NOT NULL,
-                import_status TEXT NOT NULL,
-                warning_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS entries (
-                id INTEGER PRIMARY KEY,
-                source_file_id INTEGER NOT NULL REFERENCES source_files(id) ON DELETE CASCADE,
-                wildcard_path TEXT NOT NULL,
-                item_index INTEGER NOT NULL,
-                raw_text TEXT NOT NULL,
-                staged_text TEXT,
-                normalized_text TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                prompt_mode TEXT NOT NULL DEFAULT 'unknown',
-                tags_json TEXT NOT NULL,
-                positive_tags_json TEXT NOT NULL DEFAULT '[]',
-                negative_tags_json TEXT NOT NULL DEFAULT '[]',
-                all_extracted_tags_json TEXT NOT NULL DEFAULT '[]',
-                prompt_parts_json TEXT NOT NULL DEFAULT '{}',
-                tag_categories_json TEXT NOT NULL DEFAULT '[]',
-                refs_json TEXT NOT NULL,
-                warnings_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS entry_history (
-                id INTEGER PRIMARY KEY,
-                entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
-                previous_text TEXT,
-                next_text TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS scan_runs (
-                id INTEGER PRIMARY KEY,
-                source_root TEXT NOT NULL,
-                summary_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS tag_index (
-                tag TEXT NOT NULL,
-                category TEXT NOT NULL,
-                usage_count INTEGER NOT NULL,
-                PRIMARY KEY (tag, category)
-            );
-
-            CREATE TABLE IF NOT EXISTS category_index (
-                category TEXT PRIMARY KEY,
-                usage_count INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS category_stats (
-                category TEXT PRIMARY KEY,
-                entry_count INTEGER NOT NULL,
-                file_count INTEGER NOT NULL,
-                tag_count INTEGER NOT NULL,
-                wildcard_count INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS prompt_mode_index (
-                prompt_mode TEXT PRIMARY KEY,
-                entry_count INTEGER NOT NULL,
-                file_count INTEGER NOT NULL,
-                wildcard_count INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS prompt_recipes (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                preset TEXT NOT NULL,
-                slots_json TEXT NOT NULL,
-                negative_tags_json TEXT NOT NULL,
-                wildcard_refs_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS tag_overrides (
-                tag TEXT PRIMARY KEY,
-                canonical_tag TEXT,
-                category TEXT,
-                is_ignored INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS taxonomy_rules (
-                category TEXT NOT NULL,
-                keyword TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (category, keyword)
-            );
-
-            CREATE TABLE IF NOT EXISTS taxonomy_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS source_file_stats (
-                source_file_id INTEGER PRIMARY KEY REFERENCES source_files(id) ON DELETE CASCADE,
-                entry_count INTEGER NOT NULL DEFAULT 0,
-                prompt_count INTEGER NOT NULL DEFAULT 0,
-                duplicate_count INTEGER NOT NULL DEFAULT 0,
-                unresolved_refs INTEGER NOT NULL DEFAULT 0,
-                categories_json TEXT NOT NULL DEFAULT '[]',
-                prompt_modes_json TEXT NOT NULL DEFAULT '{}',
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS llm_jobs (
-                id INTEGER PRIMARY KEY,
-                task TEXT NOT NULL,
-                prompt_mode TEXT NOT NULL,
-                endpoint TEXT NOT NULL,
-                model TEXT NOT NULL,
-                input_text TEXT NOT NULL,
-                status TEXT NOT NULL,
-                suggestion TEXT NOT NULL DEFAULT '',
-                error TEXT,
-                endpoint_used TEXT,
-                raw_json TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                accepted_at TEXT,
-                rejected_at TEXT,
-                cancelled_at TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_entries_source_file ON entries(source_file_id);
-            CREATE INDEX IF NOT EXISTS idx_entries_wildcard_path ON entries(wildcard_path);
-            CREATE INDEX IF NOT EXISTS idx_entries_normalized ON entries(normalized_text);
-            CREATE INDEX IF NOT EXISTS idx_source_files_wildcard_path ON source_files(wildcard_path);
-            """
-        )
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(entries)").fetchall()}
-        if "tag_categories_json" not in columns:
-            conn.execute("ALTER TABLE entries ADD COLUMN tag_categories_json TEXT NOT NULL DEFAULT '[]'")
-        if "prompt_mode" not in columns:
-            conn.execute("ALTER TABLE entries ADD COLUMN prompt_mode TEXT NOT NULL DEFAULT 'unknown'")
-        if "positive_tags_json" not in columns:
-            conn.execute("ALTER TABLE entries ADD COLUMN positive_tags_json TEXT NOT NULL DEFAULT '[]'")
-        if "negative_tags_json" not in columns:
-            conn.execute("ALTER TABLE entries ADD COLUMN negative_tags_json TEXT NOT NULL DEFAULT '[]'")
-        if "all_extracted_tags_json" not in columns:
-            conn.execute("ALTER TABLE entries ADD COLUMN all_extracted_tags_json TEXT NOT NULL DEFAULT '[]'")
-        if "prompt_parts_json" not in columns:
-            conn.execute("ALTER TABLE entries ADD COLUMN prompt_parts_json TEXT NOT NULL DEFAULT '{}'")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_prompt_mode ON entries(prompt_mode)")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tag_polarity_index (
-                tag TEXT NOT NULL,
-                category TEXT NOT NULL,
-                polarity TEXT NOT NULL,
-                usage_count INTEGER NOT NULL,
-                PRIMARY KEY (tag, category, polarity)
-            )
-            """
-        )
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS entry_fts USING fts5(effective_text, wildcard_path, tags)")
-        seed_taxonomy_defaults(conn)
+    pass
 
 
 def reset_library(conn: sqlite3.Connection) -> None:
-    conn.executescript(
+    conn.execute(
         """
         DROP TABLE IF EXISTS entry_fts;
-        DELETE FROM entry_history;
-        DELETE FROM entries;
-        DELETE FROM source_files;
-        DELETE FROM tag_index;
-        DELETE FROM tag_polarity_index;
-        DELETE FROM category_index;
-        DELETE FROM category_stats;
-        DELETE FROM prompt_mode_index;
-        DELETE FROM source_file_stats;
-        CREATE VIRTUAL TABLE entry_fts USING fts5(effective_text, wildcard_path, tags);
+        DELETE FROM wildcard_entry_history;
+        DELETE FROM wildcard_entries;
+        DELETE FROM wildcard_source_files;
+        DELETE FROM wildcard_tag_index;
+        DELETE FROM wildcard_tag_polarity_index;
+        DELETE FROM wildcard_category_index;
+        DELETE FROM wildcard_category_stats;
+        DELETE FROM wildcard_prompt_mode_index;
+        DELETE FROM wildcard_source_file_stats;
+        -- CREATE VIRTUAL TABLE entry_fts USING fts5(effective_text, wildcard_path, tags);
         """
     )
 
 
 def clear_aggregate_indexes(conn: sqlite3.Connection) -> None:
-    conn.executescript(
+    conn.execute(
         """
-        DELETE FROM tag_index;
-        DELETE FROM tag_polarity_index;
-        DELETE FROM category_index;
-        DELETE FROM category_stats;
-        DELETE FROM prompt_mode_index;
-        DELETE FROM source_file_stats;
+        DELETE FROM wildcard_tag_index;
+        DELETE FROM wildcard_tag_polarity_index;
+        DELETE FROM wildcard_category_index;
+        DELETE FROM wildcard_category_stats;
+        DELETE FROM wildcard_prompt_mode_index;
+        DELETE FROM wildcard_source_file_stats;
         """
     )
 
@@ -527,7 +366,7 @@ def split_prompt_tokens(text: str) -> list[str]:
 def clean_tag(value: str) -> str:
     value = value.strip()
     value = re.sub(r"^\(+|\)+$", "", value)
-    value = re.sub(r":[0-9.]+\)?$", "", value)
+    value = re.sub(r":[0-9.]+\)%s$", "", value)
     value = value.strip("{}[]() ")
     value = value.replace("\\(", "(").replace("\\)", ")")
     return value
@@ -551,8 +390,8 @@ def stable_unique(values: Iterable[str], limit: int = 160) -> list[str]:
 
 
 def strip_dynamic_weight(value: str) -> str:
-    value = re.sub(r"^\s*-?\d+(?:-\d+)?\$\$", "", value)
-    value = re.sub(r"^\s*\d+(?:\.\d+)?::", "", value)
+    value = re.sub(r"^\s*-%s\d+(%s:-\d+)%s\$\$", "", value)
+    value = re.sub(r"^\s*\d+(%s:\.\d+)%s::", "", value)
     return value.strip()
 
 
@@ -620,13 +459,13 @@ def prose_phrase_candidates(text: str) -> list[str]:
         if phrase in lowered:
             phrases.append(phrase)
     for pattern in (
-        r"\bwearing\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
-        r"\bholding\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
-        r"\b(?:standing|sitting|walking)\s+(?:in|on|through|near)\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
-        r"\bshot on\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
+        r"\bwearing\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
+        r"\bholding\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
+        r"\b(%s:standing|sitting|walking)\s+(%s:in|on|through|near)\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
+        r"\bshot on\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
     ):
         for match in re.finditer(pattern, lowered):
-            phrase = re.split(r"\b(?:with|while|during|and|,|\.|;)\b", match.group(1), maxsplit=1)[0].strip()
+            phrase = re.split(r"\b(%s:with|while|during|and|,|\.|;)\b", match.group(1), maxsplit=1)[0].strip()
             words = phrase.split()
             if 1 <= len(words) <= 6:
                 phrases.append(phrase)
@@ -642,7 +481,7 @@ def prompt_tag_candidates(section_text: str, include_refs: bool = True) -> list[
     for option in options:
         text += f", {option}"
     text = re.sub(r"[{}|]", ",", text)
-    text = re.sub(r"\b\d+(?:\.\d+)?::", "", text)
+    text = re.sub(r"\b\d+(%s:\.\d+)%s::", "", text)
     has_commas = "," in text
     chunks = split_prompt_tokens(text) if has_commas else re.split(r"[;\n]+", text)
     tags: list[str] = []
@@ -705,7 +544,7 @@ def detect_categories(text: str, wildcard_path: str, source_name: str = "", tags
             elif " " in normalized_needle:
                 matched = f" {normalized_needle} " in padded
             else:
-                matched = re.search(rf"(?<![a-z0-9]){re.escape(normalized_needle)}(?![a-z0-9])", haystack) is not None
+                matched = re.search(rf"(%s<![a-z0-9]){re.escape(normalized_needle)}(%s![a-z0-9])", haystack) is not None
             if matched:
                 break
         if matched:
@@ -992,13 +831,14 @@ def insert_entry(
     now = utc_now()
     cur = conn.execute(
         """
-        INSERT INTO entries (
+        INSERT INTO wildcard_entries (
             source_file_id, wildcard_path, item_index, raw_text, staged_text,
             normalized_text, kind, prompt_mode, tags_json, positive_tags_json, negative_tags_json,
             all_extracted_tags_json, prompt_parts_json, tag_categories_json, refs_json, warnings_json,
-            created_at, updated_at
+            created_at, updated_at, workspace_id
         )
-        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
+        RETURNING id
         """,
         (
             source_file_id,
@@ -1029,11 +869,11 @@ def insert_entry(
             now,
         ),
     )
-    entry_id = int(cur.lastrowid)
-    conn.execute(
-        "INSERT INTO entry_fts(rowid, effective_text, wildcard_path, tags) VALUES (?, ?, ?, ?)",
-        (entry_id, text, wildcard_path, " ".join(all_extracted_tags or tags)),
-    )
+    entry_id = int(cur.fetchone()["id"])
+    # conn.execute(
+    #     "-- INSERT INTO entry_fts(rowid, effective_text, wildcard_path, tags) VALUES (%s, %s, %s, %s)",
+    #     (entry_id, text, wildcard_path, " ".join(all_extracted_tags or tags)),
+    # )
     return entry_id, tags, categories, prompt_mode, positive_tags, negative_tags, all_extracted_tags
 
 
@@ -1043,24 +883,24 @@ def rebuild_source_file_stats(conn: sqlite3.Connection) -> None:
         for row in conn.execute(
             """
             SELECT normalized_text
-            FROM entries
+            FROM wildcard_entries
             WHERE normalized_text != ''
             GROUP BY normalized_text
             HAVING COUNT(*) > 1
             """
         ).fetchall()
     }
-    known_paths = {row["wildcard_path"].lower() for row in conn.execute("SELECT DISTINCT wildcard_path FROM entries")}
-    rows = conn.execute("SELECT id FROM source_files").fetchall()
-    conn.execute("DELETE FROM source_file_stats")
+    known_paths = {row["wildcard_path"].lower() for row in conn.execute("SELECT DISTINCT wildcard_path FROM wildcard_entries")}
+    rows = conn.execute("SELECT id FROM wildcard_source_files").fetchall()
+    conn.execute("DELETE FROM wildcard_source_file_stats")
     stat_rows = []
     now = utc_now()
     for source_row in rows:
         entry_rows = conn.execute(
             """
             SELECT kind, normalized_text, refs_json, tag_categories_json, prompt_mode
-            FROM entries
-            WHERE source_file_id = ?
+            FROM wildcard_entries
+            WHERE source_file_id = %s
             """,
             (source_row["id"],),
         ).fetchall()
@@ -1070,13 +910,13 @@ def rebuild_source_file_stats(conn: sqlite3.Connection) -> None:
         duplicate_count = 0
         prompt_count = 0
         for entry in entry_rows:
-            categories.update(json.loads(entry["tag_categories_json"] or "[]"))
+            categories.update(parse_db_json(entry["tag_categories_json"] or "[]"))
             prompt_modes[entry["prompt_mode"]] += 1
             if entry["kind"] == "prompt":
                 prompt_count += 1
             if entry["normalized_text"] in duplicate_norms:
                 duplicate_count += 1
-            for ref in json.loads(entry["refs_json"] or "[]"):
+            for ref in parse_db_json(entry["refs_json"] or "[]"):
                 if ref and not ref_is_resolved(ref, known_paths):
                     unresolved += 1
         stat_rows.append(
@@ -1091,12 +931,12 @@ def rebuild_source_file_stats(conn: sqlite3.Connection) -> None:
                 now,
             )
         )
-    conn.executemany(
+    conn.cursor().executemany(
         """
-        INSERT INTO source_file_stats(
+        INSERT INTO wildcard_source_file_stats(
             source_file_id, entry_count, prompt_count, duplicate_count, unresolved_refs,
-            categories_json, prompt_modes_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            categories_json, prompt_modes_json, updated_at, workspace_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'default')
         """,
         stat_rows,
     )
@@ -1116,15 +956,15 @@ def rebuild_aggregate_indexes(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         """
         SELECT e.*, sf.relative_path
-        FROM entries e
-        JOIN source_files sf ON sf.id = e.source_file_id
+        FROM wildcard_entries e
+        JOIN wildcard_source_files sf ON sf.id = e.source_file_id
         """
     ).fetchall()
     for row in rows:
-        categories = json.loads(row["tag_categories_json"] or "[]")
-        positive_tags = json.loads(row["positive_tags_json"] or "[]")
-        negative_tags = json.loads(row["negative_tags_json"] or "[]")
-        all_extracted_tags = json.loads(row["all_extracted_tags_json"] or "[]")
+        categories = parse_db_json(row["tag_categories_json"] or "[]")
+        positive_tags = parse_db_json(row["positive_tags_json"] or "[]")
+        negative_tags = parse_db_json(row["negative_tags_json"] or "[]")
+        all_extracted_tags = parse_db_json(row["all_extracted_tags_json"] or "[]")
         wildcard_path = row["wildcard_path"]
         relative = row["relative_path"]
         prompt_mode = row["prompt_mode"]
@@ -1156,21 +996,21 @@ def rebuild_aggregate_indexes(conn: sqlite3.Connection) -> None:
             for term in copyright_path_terms(wildcard_path):
                 tag_category_totals[(term, "copyright")] += 1
 
-    conn.executemany(
-        "INSERT INTO tag_index(tag, category, usage_count) VALUES (?, ?, ?)",
+    conn.cursor().executemany(
+        "INSERT INTO wildcard_tag_index(tag, category, usage_count, workspace_id) VALUES (%s, %s, %s, 'default')",
         [(tag, "__all__", count) for tag, count in tag_totals.items()],
     )
-    conn.executemany(
-        "INSERT INTO tag_index(tag, category, usage_count) VALUES (?, ?, ?)",
+    conn.cursor().executemany(
+        "INSERT INTO wildcard_tag_index(tag, category, usage_count, workspace_id) VALUES (%s, %s, %s, 'default')",
         [(tag, category, count) for (tag, category), count in tag_category_totals.items()],
     )
-    conn.executemany(
-        "INSERT INTO tag_polarity_index(tag, category, polarity, usage_count) VALUES (?, ?, ?, ?)",
+    conn.cursor().executemany(
+        "INSERT INTO wildcard_tag_polarity_index(tag, category, polarity, usage_count, workspace_id) VALUES (%s, %s, %s, %s, 'default')",
         [(tag, category, polarity, count) for (tag, category, polarity), count in tag_polarity_totals.items()],
     )
-    conn.executemany("INSERT INTO category_index(category, usage_count) VALUES (?, ?)", list(category_totals.items()))
-    conn.executemany(
-        "INSERT INTO category_stats(category, entry_count, file_count, tag_count, wildcard_count) VALUES (?, ?, ?, ?, ?)",
+    conn.cursor().executemany("INSERT INTO wildcard_category_index(category, usage_count, workspace_id) VALUES (%s, %s, 'default')", list(category_totals.items()))
+    conn.cursor().executemany(
+        "INSERT INTO wildcard_category_stats(category, entry_count, file_count, tag_count, wildcard_count, workspace_id) VALUES (%s, %s, %s, %s, %s, 'default')",
         [
             (
                 category,
@@ -1182,8 +1022,8 @@ def rebuild_aggregate_indexes(conn: sqlite3.Connection) -> None:
             for category, entry_count in category_totals.items()
         ],
     )
-    conn.executemany(
-        "INSERT INTO prompt_mode_index(prompt_mode, entry_count, file_count, wildcard_count) VALUES (?, ?, ?, ?)",
+    conn.cursor().executemany(
+        "INSERT INTO wildcard_prompt_mode_index(prompt_mode, entry_count, file_count, wildcard_count, workspace_id) VALUES (%s, %s, %s, %s, 'default')",
         [
             (
                 mode,
@@ -1231,9 +1071,9 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
             reset_library(conn)
         else:
             current_paths = {str(path) for path in files}
-            for row in conn.execute("SELECT id, original_path FROM source_files").fetchall():
+            for row in conn.execute("SELECT id, original_path FROM wildcard_source_files").fetchall():
                 if row["original_path"] not in current_paths:
-                    conn.execute("DELETE FROM source_files WHERE id = ?", (row["id"],))
+                    conn.execute("DELETE FROM wildcard_source_files WHERE id = %s", (row["id"],))
         for path in files:
             relative = path.relative_to(source_root)
             extension = path.suffix.lower()
@@ -1246,8 +1086,8 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
                 existing = conn.execute(
                     """
                     SELECT id, size_bytes, last_modified, import_status
-                    FROM source_files
-                    WHERE original_path = ?
+                    FROM wildcard_source_files
+                    WHERE original_path = %s
                     """,
                     (str(path),),
                 ).fetchone()
@@ -1262,17 +1102,26 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
             file_hash = sha256_file(path)
             cur = conn.execute(
                 """
-                INSERT OR REPLACE INTO source_files (
-                    id, original_path, relative_path, extension, size_bytes, sha256,
-                    last_modified, wildcard_path, import_status, warning_count, created_at, updated_at
+                INSERT INTO wildcard_source_files (
+                    original_path, relative_path, extension, size_bytes, sha256,
+                    last_modified, wildcard_path, import_status, warning_count, created_at, updated_at, workspace_id
                 )
                 VALUES (
-                    (SELECT id FROM source_files WHERE original_path = ?), ?, ?, ?, ?, ?, ?, ?, ?, 0,
-                    COALESCE((SELECT created_at FROM source_files WHERE original_path = ?), ?), ?
+                    %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, 'default'
                 )
+                ON CONFLICT (original_path) DO UPDATE SET
+                    relative_path = EXCLUDED.relative_path,
+                    extension = EXCLUDED.extension,
+                    size_bytes = EXCLUDED.size_bytes,
+                    sha256 = EXCLUDED.sha256,
+                    last_modified = EXCLUDED.last_modified,
+                    wildcard_path = EXCLUDED.wildcard_path,
+                    import_status = EXCLUDED.import_status,
+                    warning_count = 0,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING id
                 """,
                 (
-                    str(path),
                     str(path),
                     relative.as_posix(),
                     extension,
@@ -1281,13 +1130,12 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
                     last_modified,
                     wildcard_path,
                     "indexed",
-                    str(path),
                     now,
                     now,
                 ),
             )
-            source_file_id = int(cur.lastrowid or conn.execute("SELECT id FROM source_files WHERE original_path = ?", (str(path),)).fetchone()["id"])
-            conn.execute("DELETE FROM entries WHERE source_file_id = ?", (source_file_id,))
+            source_file_id = int(cur.fetchone()["id"])
+            conn.execute("DELETE FROM wildcard_entries WHERE source_file_id = %s", (source_file_id,))
 
             try:
                 if extension == ".txt":
@@ -1358,18 +1206,18 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
                     indexed_entries += len(yaml_entries)
             except Exception as exc:  # noqa: BLE001
                 file_warnings.append(f"Import failed: {exc}")
-                conn.execute("UPDATE source_files SET import_status = ? WHERE id = ?", ("failed", source_file_id))
+                conn.execute("UPDATE wildcard_source_files SET import_status = %s WHERE id = %s", ("failed", source_file_id))
 
             if file_warnings:
                 conn.execute(
-                    "UPDATE source_files SET warning_count = ? WHERE id = ?",
+                    "UPDATE wildcard_source_files SET warning_count = %s WHERE id = %s",
                     (len(file_warnings), source_file_id),
                 )
                 summary_warnings.extend([f"{relative.as_posix()}: {warning}" for warning in file_warnings[:3]])
             indexed_files += 1
 
         if not reset:
-            indexed_entries = conn.execute("SELECT COUNT(*) AS count FROM entries").fetchone()["count"]
+            indexed_entries = conn.execute("SELECT COUNT(*) AS count FROM wildcard_entries").fetchone()["count"]
             rebuild_aggregate_indexes(conn)
             summary = ScanSummary(
                 source_root=str(source_root),
@@ -1379,31 +1227,31 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
                 files_skipped=skipped_files,
                 files_changed=indexed_files,
                 entries_indexed=indexed_entries,
-                txt_files=conn.execute("SELECT COUNT(*) AS count FROM source_files WHERE extension = '.txt'").fetchone()["count"],
-                yaml_files=conn.execute("SELECT COUNT(*) AS count FROM source_files WHERE extension IN ('.yaml', '.yml')").fetchone()["count"],
+                txt_files=conn.execute("SELECT COUNT(*) AS count FROM wildcard_source_files WHERE extension = '.txt'").fetchone()["count"],
+                yaml_files=conn.execute("SELECT COUNT(*) AS count FROM wildcard_source_files WHERE extension IN ('.yaml', '.yml')").fetchone()["count"],
                 total_mb=round(total_bytes / (1024 * 1024), 2),
                 warnings=summary_warnings[:200],
             )
             conn.execute(
-                "INSERT INTO scan_runs(source_root, summary_json, created_at) VALUES (?, ?, ?)",
+                "INSERT INTO wildcard_scan_runs(source_root, summary_json, created_at, workspace_id) VALUES (%s, %s, %s, 'default')",
                 (str(source_root), summary.model_dump_json(), utc_now()),
             )
             return summary
 
-        conn.executemany(
-            "INSERT INTO tag_index(tag, category, usage_count) VALUES (?, ?, ?)",
+        conn.cursor().executemany(
+            "INSERT INTO wildcard_tag_index(tag, category, usage_count, workspace_id) VALUES (%s, %s, %s, 'default')",
             [(tag, "__all__", count) for tag, count in tag_totals.items()],
         )
-        conn.executemany(
-            "INSERT INTO tag_index(tag, category, usage_count) VALUES (?, ?, ?)",
+        conn.cursor().executemany(
+            "INSERT INTO wildcard_tag_index(tag, category, usage_count, workspace_id) VALUES (%s, %s, %s, 'default')",
             [(tag, category, count) for (tag, category), count in tag_category_totals.items()],
         )
-        conn.executemany(
-            "INSERT INTO tag_polarity_index(tag, category, polarity, usage_count) VALUES (?, ?, ?, ?)",
+        conn.cursor().executemany(
+            "INSERT INTO wildcard_tag_polarity_index(tag, category, polarity, usage_count, workspace_id) VALUES (%s, %s, %s, %s, 'default')",
             [(tag, category, polarity, count) for (tag, category, polarity), count in tag_polarity_totals.items()],
         )
-        conn.executemany(
-            "INSERT INTO category_index(category, usage_count) VALUES (?, ?)",
+        conn.cursor().executemany(
+            "INSERT INTO wildcard_category_index(category, usage_count, workspace_id) VALUES (%s, %s, 'default')",
             list(category_totals.items()),
         )
         stat_rows = []
@@ -1418,12 +1266,12 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
                     len(category_wildcards[category]),
                 )
             )
-        conn.executemany(
-            "INSERT INTO category_stats(category, entry_count, file_count, tag_count, wildcard_count) VALUES (?, ?, ?, ?, ?)",
+        conn.cursor().executemany(
+            "INSERT INTO wildcard_category_stats(category, entry_count, file_count, tag_count, wildcard_count, workspace_id) VALUES (%s, %s, %s, %s, %s, 'default')",
             stat_rows,
         )
-        conn.executemany(
-            "INSERT INTO prompt_mode_index(prompt_mode, entry_count, file_count, wildcard_count) VALUES (?, ?, ?, ?)",
+        conn.cursor().executemany(
+            "INSERT INTO wildcard_prompt_mode_index(prompt_mode, entry_count, file_count, wildcard_count, workspace_id) VALUES (%s, %s, %s, %s, 'default')",
             [
                 (
                     mode,
@@ -1451,7 +1299,7 @@ def scan_library(source_root: Path, reset: bool, mode: Literal["incremental", "r
             warnings=summary_warnings[:200],
         )
         conn.execute(
-            "INSERT INTO scan_runs(source_root, summary_json, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO wildcard_scan_runs(source_root, summary_json, created_at, workspace_id) VALUES (%s, %s, %s, 'default')",
             (str(source_root), summary.model_dump_json(), utc_now()),
         )
         return summary
@@ -1466,10 +1314,11 @@ def run_background_scan(source: Path, reset: bool, mode: Literal["incremental", 
                     "running": False,
                     "finished_at": utc_now(),
                     "summary": summary.model_dump(),
-                    "error": None,
                 }
             )
     except Exception as exc:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
         with SCAN_LOCK:
             SCAN_STATE.update(
                 {
@@ -1496,20 +1345,20 @@ def entry_from_row(row: sqlite3.Row) -> EntryItem:
         normalized_text=row["normalized_text"],
         kind=row["kind"],
         prompt_mode=row["prompt_mode"],
-        tags=json.loads(row["tags_json"] or "[]"),
-        positive_tags=json.loads(row["positive_tags_json"] or "[]"),
-        negative_tags=json.loads(row["negative_tags_json"] or "[]"),
-        all_extracted_tags=json.loads(row["all_extracted_tags_json"] or "[]"),
-        prompt_parts=json.loads(row["prompt_parts_json"] or "{}"),
-        tag_categories=json.loads(row["tag_categories_json"] or "[]"),
-        refs=json.loads(row["refs_json"] or "[]"),
-        warnings=json.loads(row["warnings_json"] or "[]"),
+        tags=parse_db_json(row["tags_json"] or "[]"),
+        positive_tags=parse_db_json(row["positive_tags_json"] or "[]"),
+        negative_tags=parse_db_json(row["negative_tags_json"] or "[]"),
+        all_extracted_tags=parse_db_json(row["all_extracted_tags_json"] or "[]"),
+        prompt_parts=parse_db_json(row["prompt_parts_json"] or "{}"),
+        tag_categories=parse_db_json(row["tag_categories_json"] or "[]"),
+        refs=parse_db_json(row["refs_json"] or "[]"),
+        warnings=parse_db_json(row["warnings_json"] or "[]"),
         is_dirty=staged is not None and staged != raw,
     )
 
 
 def wildcard_paths(conn: sqlite3.Connection) -> set[str]:
-    rows = conn.execute("SELECT DISTINCT wildcard_path FROM entries").fetchall()
+    rows = conn.execute("SELECT DISTINCT wildcard_path FROM wildcard_entries").fetchall()
     return {row["wildcard_path"].lower() for row in rows}
 
 
@@ -1526,10 +1375,10 @@ def list_wildcards(
     conditions = []
     params: list[Any] = []
     if search:
-        conditions.append("(sf.relative_path LIKE ? OR sf.wildcard_path LIKE ?)")
+        conditions.append("(sf.relative_path LIKE %s OR sf.wildcard_path LIKE %s)")
         params.extend([f"%{search}%", f"%{search}%"])
     if kind:
-        conditions.append("EXISTS (SELECT 1 FROM entries ek WHERE ek.source_file_id = sf.id AND ek.kind = ?)")
+        conditions.append("EXISTS (SELECT 1 FROM wildcard_entries ek WHERE ek.source_file_id = sf.id AND ek.kind = %s)")
         params.append(kind)
     if tag:
         polarity_column = {
@@ -1537,13 +1386,13 @@ def list_wildcards(
             "negative": "negative_tags_json",
             "all": "all_extracted_tags_json",
         }.get(tag_polarity, "all_extracted_tags_json")
-        conditions.append(f"EXISTS (SELECT 1 FROM entries et WHERE et.source_file_id = sf.id AND et.{polarity_column} LIKE ?)")
+        conditions.append(f"EXISTS (SELECT 1 FROM wildcard_entries et WHERE et.source_file_id = sf.id AND et.{polarity_column} LIKE %s)")
         params.append(f"%{tag}%")
     if category:
-        conditions.append("EXISTS (SELECT 1 FROM entries ec WHERE ec.source_file_id = sf.id AND ec.tag_categories_json LIKE ?)")
+        conditions.append("EXISTS (SELECT 1 FROM wildcard_entries ec WHERE ec.source_file_id = sf.id AND ec.tag_categories_json LIKE %s)")
         params.append(f"%{category}%")
     if prompt_mode:
-        conditions.append("EXISTS (SELECT 1 FROM entries epm WHERE epm.source_file_id = sf.id AND epm.prompt_mode = ?)")
+        conditions.append("EXISTS (SELECT 1 FROM wildcard_entries epm WHERE epm.source_file_id = sf.id AND epm.prompt_mode = %s)")
         params.append(prompt_mode)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
@@ -1560,36 +1409,43 @@ def list_wildcards(
             COALESCE(sfs.unresolved_refs, 0) AS unresolved_refs,
             COALESCE(sfs.categories_json, '[]') AS categories_json,
             COALESCE(sfs.prompt_modes_json, '{{}}') AS prompt_modes_json
-        FROM source_files sf
-        LEFT JOIN source_file_stats sfs ON sfs.source_file_id = sf.id
+        FROM wildcard_source_files sf
+        LEFT JOIN wildcard_source_file_stats sfs ON sfs.source_file_id = sf.id
         {where}
-        ORDER BY sf.relative_path COLLATE NOCASE
-        LIMIT ? OFFSET ?
+        ORDER BY LOWER(sf.relative_path)
+        LIMIT %s OFFSET %s
     """
     params.extend([limit, offset])
     with connect() as conn:
-        rows = conn.execute(query, params).fetchall()
-        items: list[WildcardListItem] = []
-        for row in rows:
-            categories = json.loads(row["categories_json"] or "[]")
-            prompt_modes = json.loads(row["prompt_modes_json"] or "{}")
-            items.append(
-                WildcardListItem(
-                    id=row["id"],
-                    wildcard_path=row["wildcard_path"],
-                    relative_path=row["relative_path"],
-                    extension=row["extension"],
-                    size_bytes=row["size_bytes"],
-                    entry_count=row["entry_count"] or 0,
-                    prompt_count=row["prompt_count"] or 0,
-                    duplicate_count=row["duplicate_count"] or 0,
-                    unresolved_refs=row["unresolved_refs"] or 0,
-                    categories=sorted(categories, key=str.lower)[:12],
-                    prompt_modes=prompt_modes,
-                    updated_at=row["updated_at"],
+        try:
+            rows = conn.execute(query, params).fetchall()
+            items: list[WildcardListItem] = []
+            for row in rows:
+                cat_raw = row["categories_json"]
+                categories = parse_db_json(cat_raw or "[]") if isinstance(cat_raw, str) else (cat_raw or [])
+                pm_raw = row["prompt_modes_json"]
+                prompt_modes = parse_db_json(pm_raw or "{}") if isinstance(pm_raw, str) else (pm_raw or {})
+                items.append(
+                    WildcardListItem(
+                        id=row["id"],
+                        wildcard_path=row["wildcard_path"],
+                        relative_path=row["relative_path"],
+                        extension=row["extension"],
+                        size_bytes=row["size_bytes"],
+                        updated_at=row["updated_at"],
+                        entry_count=row["entry_count"] or 0,
+                        prompt_count=row["prompt_count"] or 0,
+                        duplicate_count=row["duplicate_count"] or 0,
+                        unresolved_refs=row["unresolved_refs"] or 0,
+                        categories=sorted(categories, key=str.lower)[:12],
+                        prompt_modes=prompt_modes,
+                    )
                 )
-            )
-        return items
+            return items
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 def build_duplicate_groups(limit: int = 200) -> list[dict[str, Any]]:
@@ -1598,46 +1454,46 @@ def build_duplicate_groups(limit: int = 200) -> list[dict[str, Any]]:
         file_rows = conn.execute(
             """
             SELECT sha256, COUNT(*) AS count, json_group_array(relative_path) AS paths
-            FROM source_files
+            FROM wildcard_source_files
             GROUP BY sha256
             HAVING COUNT(*) > 1
             ORDER BY count DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
         for row in file_rows:
-            groups.append({"type": "exact_file", "key": row["sha256"], "count": row["count"], "items": json.loads(row["paths"])})
+            groups.append({"type": "exact_file", "key": row["sha256"], "count": row["count"], "items": parse_db_json(row["paths"])})
 
         line_rows = conn.execute(
             """
             SELECT normalized_text, COUNT(*) AS count,
                    json_group_array(wildcard_path || '#' || item_index) AS items
-            FROM entries
+            FROM wildcard_entries
             WHERE normalized_text != ''
             GROUP BY normalized_text
             HAVING COUNT(*) > 1
             ORDER BY count DESC, length(normalized_text) DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
         for row in line_rows:
-            groups.append({"type": "normalized_entry", "key": row["normalized_text"], "count": row["count"], "items": json.loads(row["items"])})
+            groups.append({"type": "normalized_entry", "key": row["normalized_text"], "count": row["count"], "items": parse_db_json(row["items"])})
 
         path_rows = conn.execute(
             """
             SELECT lower(wildcard_path) AS key, COUNT(*) AS count, json_group_array(relative_path) AS paths
-            FROM source_files
+            FROM wildcard_source_files
             GROUP BY lower(wildcard_path)
             HAVING COUNT(*) > 1
             ORDER BY count DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
         for row in path_rows:
-            groups.append({"type": "path_collision", "key": row["key"], "count": row["count"], "items": json.loads(row["paths"])})
+            groups.append({"type": "path_collision", "key": row["key"], "count": row["count"], "items": parse_db_json(row["paths"])})
     return groups
 
 
@@ -1645,9 +1501,9 @@ def compute_unresolved_refs(conn: sqlite3.Connection, rows: list[sqlite3.Row] | 
     known = wildcard_paths(conn)
     unresolved = set()
     if rows is None:
-        rows = conn.execute("SELECT refs_json FROM entries WHERE refs_json != '[]'").fetchall()
+        rows = conn.execute("SELECT refs_json FROM wildcard_entries WHERE refs_json != '[]'").fetchall()
     for row in rows:
-        for ref in json.loads(row["refs_json"] or "[]"):
+        for ref in parse_db_json(row["refs_json"] or "[]"):
             if ref and not ref_is_resolved(ref, known):
                 unresolved.add(ref)
     return sorted(unresolved, key=str.lower)
@@ -1658,15 +1514,15 @@ def export_entry_rows(ids: list[int] | None = None, prompt_mode: str = "all") ->
         conditions = []
         params: list[Any] = []
         if ids:
-            placeholders = ",".join("?" for _ in ids)
+            placeholders = ",".join("%s" for _ in ids)
             conditions.append(f"source_file_id IN ({placeholders})")
             params.extend(ids)
         if prompt_mode != "all":
-            conditions.append("prompt_mode = ?")
+            conditions.append("prompt_mode = %s")
             params.append(prompt_mode)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = conn.execute(
-            f"SELECT * FROM entries {where} ORDER BY wildcard_path, item_index",
+            f"SELECT * FROM wildcard_entries {where} ORDER BY wildcard_path, item_index",
             params,
         ).fetchall()
     return rows
@@ -1705,11 +1561,11 @@ def export_metadata_summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
     refs: set[str] = set()
     for row in rows:
         prompt_modes[row["prompt_mode"]] += 1
-        positive_tags.update(json.loads(row["positive_tags_json"] or "[]"))
-        negative_tags.update(json.loads(row["negative_tags_json"] or "[]"))
-        warnings = json.loads(row["warnings_json"] or "[]")
+        positive_tags.update(parse_db_json(row["positive_tags_json"] or "[]"))
+        negative_tags.update(parse_db_json(row["negative_tags_json"] or "[]"))
+        warnings = parse_db_json(row["warnings_json"] or "[]")
         warning_count += len(warnings)
-        refs.update(json.loads(row["refs_json"] or "[]"))
+        refs.update(parse_db_json(row["refs_json"] or "[]"))
     return {
         "entry_count": len(rows),
         "wildcard_count": len({row["wildcard_path"] for row in rows}),
@@ -1774,9 +1630,9 @@ def build_export_plan(request: ExportRequest, write: bool) -> ExportPlan:
     manifest_path = str(target_root / "wildcard-workshop-manifest.json") if request.include_manifest else None
     with connect() as conn:
         unresolved = compute_unresolved_refs(conn, selected_rows)
-        last_scan = conn.execute("SELECT summary_json FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone()
-        taxonomy = conn.execute("SELECT value FROM taxonomy_meta WHERE key = 'version'").fetchone()
-        llm_counts = conn.execute("SELECT status, COUNT(*) AS count FROM llm_jobs GROUP BY status").fetchall()
+        last_scan = conn.execute("SELECT summary_json FROM wildcard_scan_runs ORDER BY id DESC LIMIT 1").fetchone()
+        taxonomy = conn.execute("SELECT value FROM wildcard_taxonomy_meta WHERE key = 'version'").fetchone()
+        llm_counts = conn.execute("SELECT status, COUNT(*) AS count FROM wildcard_llm_jobs GROUP BY status").fetchall()
     plan = ExportPlan(
         target_root=str(target_root),
         format=request.format,
@@ -1796,7 +1652,7 @@ def build_export_plan(request: ExportRequest, write: bool) -> ExportPlan:
                     "format": request.format,
                     "prompt_mode": request.prompt_mode,
                     "source_root": str(DEFAULT_SOURCE_ROOT),
-                    "scan_mode": json.loads(last_scan["summary_json"]).get("scan_mode") if last_scan else None,
+                    "scan_mode": parse_db_json(last_scan["summary_json"]).get("scan_mode") if last_scan else None,
                     "parser_version": "prompt-aware-v2",
                     "taxonomy_version": taxonomy["value"] if taxonomy else None,
                     "llm_suggestion_counts": {row["status"]: row["count"] for row in llm_counts},
@@ -1921,10 +1777,10 @@ def llm_job_from_row(row: sqlite3.Row) -> LlmJobItem:
 
 def run_llm_job(job_id: int) -> None:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM llm_jobs WHERE id = ?", (job_id,)).fetchone()
+        row = conn.execute("SELECT * FROM wildcard_llm_jobs WHERE id = %s", (job_id,)).fetchone()
         if not row or row["status"] == "cancelled":
             return
-        conn.execute("UPDATE llm_jobs SET status = 'running', updated_at = ? WHERE id = ?", (utc_now(), job_id))
+        conn.execute("UPDATE wildcard_llm_jobs SET status = 'running', updated_at = %s WHERE id = %s", (utc_now(), job_id))
         request = LlmSuggestRequest(
             task=row["task"],
             text=row["input_text"],
@@ -1935,14 +1791,14 @@ def run_llm_job(job_id: int) -> None:
     try:
         result = asyncio.run(call_kobold(request))
         with connect() as conn:
-            current = conn.execute("SELECT status FROM llm_jobs WHERE id = ?", (job_id,)).fetchone()
+            current = conn.execute("SELECT status FROM wildcard_llm_jobs WHERE id = %s", (job_id,)).fetchone()
             if current and current["status"] == "cancelled":
                 return
             conn.execute(
                 """
-                UPDATE llm_jobs
-                SET status = ?, suggestion = ?, error = ?, endpoint_used = ?, raw_json = ?, updated_at = ?
-                WHERE id = ?
+                UPDATE wildcard_llm_jobs
+                SET status = %s, suggestion = %s, error = %s, endpoint_used = %s, raw_json = %s, updated_at = %s
+                WHERE id = %s
                 """,
                 (
                     "completed" if result.ok else "failed",
@@ -1957,7 +1813,7 @@ def run_llm_job(job_id: int) -> None:
     except Exception as exc:  # noqa: BLE001
         with connect() as conn:
             conn.execute(
-                "UPDATE llm_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+                "UPDATE wildcard_llm_jobs SET status = 'failed', error = %s, updated_at = %s WHERE id = %s",
                 (str(exc), utc_now(), job_id),
             )
 
@@ -1968,11 +1824,10 @@ router = APIRouter(prefix="", tags=["wildcards"])
 
 @router.get("/health")
 def health() -> dict[str, Any]:
-    init_db()
     with connect() as conn:
-        files = conn.execute("SELECT COUNT(*) AS count FROM source_files").fetchone()["count"]
-        entries = conn.execute("SELECT COUNT(*) AS count FROM entries").fetchone()["count"]
-        last_scan = conn.execute("SELECT summary_json, created_at FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone()
+        files = conn.execute("SELECT COUNT(*) AS count FROM wildcard_source_files").fetchone()["count"]
+        entries = conn.execute("SELECT COUNT(*) AS count FROM wildcard_entries").fetchone()["count"]
+        last_scan = conn.execute("SELECT summary_json, created_at FROM wildcard_scan_runs ORDER BY id DESC LIMIT 1").fetchone()
     return {
         "ok": True,
         "db_path": str(DB_PATH),
@@ -2038,18 +1893,18 @@ def get_wildcards(
 @router.get("/prompt-modes")
 def get_prompt_modes() -> dict[str, Any]:
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM prompt_mode_index ORDER BY entry_count DESC").fetchall()
+        rows = conn.execute("SELECT * FROM wildcard_prompt_mode_index ORDER BY entry_count DESC").fetchall()
     return {"modes": [dict(row) for row in rows]}
 
 
 @router.get("/wildcards/{source_file_id}", response_model=WildcardDetail)
 def get_wildcard(source_file_id: int, limit: int = Query(default=500, ge=1, le=5000), offset: int = Query(default=0, ge=0)) -> WildcardDetail:
     with connect() as conn:
-        file_row = conn.execute("SELECT * FROM source_files WHERE id = ?", (source_file_id,)).fetchone()
+        file_row = conn.execute("SELECT * FROM wildcard_source_files WHERE id = %s", (source_file_id,)).fetchone()
         if not file_row:
             raise HTTPException(status_code=404, detail="Wildcard file not found")
         entry_rows = conn.execute(
-            "SELECT * FROM entries WHERE source_file_id = ? ORDER BY item_index LIMIT ? OFFSET ?",
+            "SELECT * FROM wildcard_entries WHERE source_file_id = %s ORDER BY item_index LIMIT %s OFFSET %s",
             (source_file_id, limit, offset),
         ).fetchall()
         entries = [entry_from_row(row) for row in entry_rows]
@@ -2062,7 +1917,7 @@ def get_wildcard(source_file_id: int, limit: int = Query(default=500, ge=1, le=5
 @router.patch("/entries/{entry_id}", response_model=EntryItem)
 def patch_entry(entry_id: int, request: EntryPatch) -> EntryItem:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        row = conn.execute("SELECT * FROM wildcard_entries WHERE id = %s", (entry_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Entry not found")
         previous = row["staged_text"] if row["staged_text"] is not None else row["raw_text"]
@@ -2075,11 +1930,11 @@ def patch_entry(entry_id: int, request: EntryPatch) -> EntryItem:
         prompt_mode = detect_prompt_mode(request.staged_text, row["wildcard_path"], row["wildcard_path"], kind)
         conn.execute(
             """
-            UPDATE entries
-            SET staged_text = ?, normalized_text = ?, tags_json = ?, positive_tags_json = ?,
-                negative_tags_json = ?, all_extracted_tags_json = ?, prompt_parts_json = ?,
-                refs_json = ?, tag_categories_json = ?, warnings_json = ?, kind = ?, prompt_mode = ?, updated_at = ?
-            WHERE id = ?
+            UPDATE wildcard_entries
+            SET staged_text = %s, normalized_text = %s, tags_json = %s, positive_tags_json = %s,
+                negative_tags_json = %s, all_extracted_tags_json = %s, prompt_parts_json = %s,
+                refs_json = %s, tag_categories_json = %s, warnings_json = %s, kind = %s, prompt_mode = %s, updated_at = %s
+            WHERE id = %s
             """,
             (
                 request.staged_text,
@@ -2107,16 +1962,16 @@ def patch_entry(entry_id: int, request: EntryPatch) -> EntryItem:
                 entry_id,
             ),
         )
-        conn.execute("DELETE FROM entry_fts WHERE rowid = ?", (entry_id,))
+        conn.execute("-- DELETE FROM entry_fts WHERE rowid = %s", (entry_id,))
         conn.execute(
-            "INSERT INTO entry_fts(rowid, effective_text, wildcard_path, tags) VALUES (?, ?, ?, ?)",
+            "-- INSERT INTO entry_fts(rowid, effective_text, wildcard_path, tags) VALUES (%s, %s, %s, %s)",
             (entry_id, request.staged_text, row["wildcard_path"], " ".join(parsed["all_extracted_tags"] or tags)),
         )
         conn.execute(
-            "INSERT INTO entry_history(entry_id, previous_text, next_text, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO wildcard_entry_history(entry_id, previous_text, next_text, created_at, workspace_id) VALUES (%s, %s, %s, %s, 'default')",
             (entry_id, previous, request.staged_text, utc_now()),
         )
-        updated = conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        updated = conn.execute("SELECT * FROM wildcard_entries WHERE id = %s", (entry_id,)).fetchone()
         return entry_from_row(updated)
 
 
@@ -2134,9 +1989,9 @@ def get_tags(
             rows = conn.execute(
                 f"""
                 SELECT tag, usage_count FROM {table}
-                WHERE category = ? AND polarity = ? AND tag LIKE ?
-                ORDER BY usage_count DESC, tag COLLATE NOCASE
-                LIMIT ?
+                WHERE category = %s AND polarity = %s AND tag LIKE %s
+                ORDER BY usage_count DESC, LOWER(tag)
+                LIMIT %s
                 """,
                 (index_category, tag_polarity, f"%{search}%", limit),
             ).fetchall()
@@ -2144,9 +1999,9 @@ def get_tags(
             rows = conn.execute(
                 f"""
                 SELECT tag, usage_count FROM {table}
-                WHERE category = ? AND polarity = ?
-                ORDER BY usage_count DESC, tag COLLATE NOCASE
-                LIMIT ?
+                WHERE category = %s AND polarity = %s
+                ORDER BY usage_count DESC, LOWER(tag)
+                LIMIT %s
                 """,
                 (index_category, tag_polarity, limit),
             ).fetchall()
@@ -2162,8 +2017,8 @@ def get_categories() -> CategoriesResponse:
             SELECT ci.category, ci.usage_count, COALESCE(cs.file_count, 0) AS file_count,
                    COALESCE(cs.tag_count, 0) AS tag_count,
                    COALESCE(cs.wildcard_count, 0) AS wildcard_count
-            FROM category_index ci
-            LEFT JOIN category_stats cs ON cs.category = ci.category
+            FROM wildcard_category_index ci
+            LEFT JOIN wildcard_category_stats cs ON cs.category = ci.category
             ORDER BY ci.usage_count DESC, ci.category
             """
         ).fetchall()
@@ -2289,18 +2144,17 @@ async def llm_test(request: LlmSuggestRequest) -> LlmSuggestResponse:
 
 @router.post("/llm/jobs", response_model=LlmJobItem)
 def create_llm_job(request: LlmJobRequest) -> LlmJobItem:
-    init_db()
     now = utc_now()
     with connect() as conn:
         cur = conn.execute(
             """
-            INSERT INTO llm_jobs(task, prompt_mode, endpoint, model, input_text, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+            INSERT INTO wildcard_llm_jobs(task, prompt_mode, endpoint, model, input_text, status, created_at, updated_at, workspace_id)
+            VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, 'default') RETURNING id
             """,
             (request.task, request.prompt_mode, request.endpoint, request.model, request.text, now, now),
         )
-        job_id = int(cur.lastrowid)
-        row = conn.execute("SELECT * FROM llm_jobs WHERE id = ?", (job_id,)).fetchone()
+        job_id = int(cur.fetchone()["id"])
+        row = conn.execute("SELECT * FROM wildcard_llm_jobs WHERE id = %s", (job_id,)).fetchone()
     thread = threading.Thread(target=run_llm_job, args=(job_id,), daemon=True)
     thread.start()
     return llm_job_from_row(row)
@@ -2308,17 +2162,15 @@ def create_llm_job(request: LlmJobRequest) -> LlmJobItem:
 
 @router.get("/llm/jobs", response_model=list[LlmJobItem])
 def list_llm_jobs(limit: int = Query(default=50, ge=1, le=200)) -> list[LlmJobItem]:
-    init_db()
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM llm_jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute("SELECT * FROM wildcard_llm_jobs ORDER BY id DESC LIMIT %s", (limit,)).fetchall()
     return [llm_job_from_row(row) for row in rows]
 
 
 @router.get("/llm/jobs/{job_id}", response_model=LlmJobItem)
 def get_llm_job(job_id: int) -> LlmJobItem:
-    init_db()
     with connect() as conn:
-        row = conn.execute("SELECT * FROM llm_jobs WHERE id = ?", (job_id,)).fetchone()
+        row = conn.execute("SELECT * FROM wildcard_llm_jobs WHERE id = %s", (job_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="LLM job not found")
     return llm_job_from_row(row)
@@ -2326,18 +2178,17 @@ def get_llm_job(job_id: int) -> LlmJobItem:
 
 @router.post("/llm/jobs/{job_id}/cancel", response_model=LlmJobItem)
 def cancel_llm_job(job_id: int) -> LlmJobItem:
-    init_db()
     now = utc_now()
     with connect() as conn:
-        row = conn.execute("SELECT * FROM llm_jobs WHERE id = ?", (job_id,)).fetchone()
+        row = conn.execute("SELECT * FROM wildcard_llm_jobs WHERE id = %s", (job_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="LLM job not found")
         if row["status"] in {"pending", "running"}:
             conn.execute(
-                "UPDATE llm_jobs SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?",
+                "UPDATE wildcard_llm_jobs SET status = 'cancelled', cancelled_at = %s, updated_at = %s WHERE id = %s",
                 (now, now, job_id),
             )
-        updated = conn.execute("SELECT * FROM llm_jobs WHERE id = ?", (job_id,)).fetchone()
+        updated = conn.execute("SELECT * FROM wildcard_llm_jobs WHERE id = %s", (job_id,)).fetchone()
     return llm_job_from_row(updated)
 
 
@@ -2364,16 +2215,16 @@ def cleanup_preview(request: CleanupPreviewRequest) -> CleanupPreviewResponse:
 @router.get("/prompt-recipes")
 def list_prompt_recipes() -> dict[str, Any]:
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM prompt_recipes ORDER BY updated_at DESC, name COLLATE NOCASE").fetchall()
+        rows = conn.execute("SELECT * FROM wildcard_prompt_recipes ORDER BY updated_at DESC, LOWER(name)").fetchall()
     return {
         "recipes": [
             {
                 "id": row["id"],
                 "name": row["name"],
                 "preset": row["preset"],
-                "slots": json.loads(row["slots_json"]),
-                "negative_tags": json.loads(row["negative_tags_json"]),
-                "wildcard_refs": json.loads(row["wildcard_refs_json"]),
+                "slots": parse_db_json(row["slots_json"]),
+                "negative_tags": parse_db_json(row["negative_tags_json"]),
+                "wildcard_refs": parse_db_json(row["wildcard_refs_json"]),
                 "updated_at": row["updated_at"],
             }
             for row in rows
@@ -2387,8 +2238,8 @@ def save_prompt_recipe(request: PromptRecipeSaveRequest) -> dict[str, Any]:
     with connect() as conn:
         cur = conn.execute(
             """
-            INSERT INTO prompt_recipes(name, preset, slots_json, negative_tags_json, wildcard_refs_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO wildcard_prompt_recipes(name, preset, slots_json, negative_tags_json, wildcard_refs_json, created_at, updated_at, workspace_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'default') RETURNING id
             """,
             (
                 request.name,
@@ -2400,13 +2251,13 @@ def save_prompt_recipe(request: PromptRecipeSaveRequest) -> dict[str, Any]:
                 now,
             ),
         )
-        return {"id": cur.lastrowid, "updated_at": now}
+        return {"id": cur.fetchone()["id"], "updated_at": now}
 
 
 @router.get("/tag-overrides")
 def list_tag_overrides() -> dict[str, Any]:
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM tag_overrides ORDER BY updated_at DESC, tag COLLATE NOCASE").fetchall()
+        rows = conn.execute("SELECT * FROM wildcard_tag_overrides ORDER BY updated_at DESC, LOWER(tag)").fetchall()
     return {"overrides": [dict(row) for row in rows]}
 
 
@@ -2416,9 +2267,9 @@ def save_tag_override(request: TagOverrideRequest) -> dict[str, Any]:
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO tag_overrides(tag, canonical_tag, category, is_ignored, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(tag) DO UPDATE SET
+            INSERT INTO wildcard_tag_overrides(tag, canonical_tag, category, is_ignored, updated_at, workspace_id)
+            VALUES (%s, %s, %s, %s, %s, 'default')
+            ON CONFLICT(tag, workspace_id) DO UPDATE SET
                 canonical_tag = excluded.canonical_tag,
                 category = excluded.category,
                 is_ignored = excluded.is_ignored,
@@ -2431,12 +2282,12 @@ def save_tag_override(request: TagOverrideRequest) -> dict[str, Any]:
 
 @router.get("/taxonomy")
 def get_taxonomy() -> dict[str, Any]:
-    init_db()
+    pass
     with connect() as conn:
         rows = conn.execute(
-            "SELECT category, keyword, enabled, updated_at FROM taxonomy_rules ORDER BY category, keyword"
+            "SELECT category, keyword, enabled, updated_at FROM wildcard_taxonomy_rules ORDER BY category, keyword"
         ).fetchall()
-        meta = conn.execute("SELECT value, updated_at FROM taxonomy_meta WHERE key = 'version'").fetchone()
+        meta = conn.execute("SELECT value, updated_at FROM wildcard_taxonomy_meta WHERE key = 'version'").fetchone()
     rules: dict[str, list[str]] = defaultdict(list)
     disabled: dict[str, list[str]] = defaultdict(list)
     for row in rows:
@@ -2458,7 +2309,7 @@ def update_taxonomy(request: TaxonomyPatchRequest) -> dict[str, Any]:
     now = utc_now()
     with connect() as conn:
         if request.rules is not None:
-            conn.execute("DELETE FROM taxonomy_rules")
+            conn.execute("DELETE FROM wildcard_taxonomy_rules")
             rows = [
                 (category.strip(), keyword.strip(), now)
                 for category, keywords in request.rules.items()
@@ -2469,14 +2320,14 @@ def update_taxonomy(request: TaxonomyPatchRequest) -> dict[str, Any]:
             category = (request.category or "").strip()
             if not category:
                 raise HTTPException(status_code=400, detail="Category is required")
-            conn.execute("DELETE FROM taxonomy_rules WHERE category = ?", (category,))
+            conn.execute("DELETE FROM wildcard_taxonomy_rules WHERE category = %s", (category,))
             rows = [(category, keyword.strip(), now) for keyword in request.keywords or [] if keyword.strip()]
-        conn.executemany(
-            "INSERT OR REPLACE INTO taxonomy_rules(category, keyword, enabled, updated_at) VALUES (?, ?, 1, ?)",
+        conn.cursor().executemany(
+            "INSERT INTO wildcard_taxonomy_rules(category, keyword, enabled, updated_at, workspace_id) VALUES (%s, %s, 1, %s, 'default') ON CONFLICT (category, keyword, workspace_id) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at",
             rows,
         )
         conn.execute(
-            "INSERT OR REPLACE INTO taxonomy_meta(key, value, updated_at) VALUES ('version', ?, ?)",
+            "INSERT INTO wildcard_taxonomy_meta(key, value, updated_at, workspace_id) VALUES ('version', %s, %s, 'default') ON CONFLICT (key, workspace_id) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
             (now, now),
         )
     taxonomy_rules_cached.cache_clear()

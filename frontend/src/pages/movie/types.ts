@@ -619,11 +619,14 @@ export interface ImageGenerationSettings {
 
 export interface VideoGenerationSettings {
   enabled: boolean;
-  provider: "mock" | "lightx2v";
+  provider: "mock" | "lightx2v" | "wan_gguf";
   model_root: string;
   model_class: string;
   encoder_root: string;
   vae_root: string;
+  gguf_model_path?: string;
+  lora_path?: string;
+  lora_scale?: number;
   quantization_preset: string;
   attention_mode: string;
   infer_steps: number;

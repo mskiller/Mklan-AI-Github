@@ -1,16 +1,53 @@
 services:
+  studio_db:
+    image: pgvector/pgvector:pg16
+    container_name: mklan-studio-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${STUDIO_POSTGRES_DB:-mklan_studio}
+      POSTGRES_USER: ${STUDIO_POSTGRES_USER:-mklan_studio}
+      POSTGRES_PASSWORD: ${STUDIO_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - ./data/studio_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${STUDIO_POSTGRES_USER:-mklan_studio} -d ${STUDIO_POSTGRES_DB:-mklan_studio}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  studio_redis:
+    image: redis:7-alpine
+    container_name: mklan-studio-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - studio_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: ./backend
-      dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
+      dockerfile: Dockerfile.gpu
+    container_name: mklan-studio-backend
     ports:
       - "8080:8080"
     volumes:
       - ./data:/app/data
       - ./backend/app:/app/app:ro
+      - ./backend/tests:/app/tests:ro
       - sillytavern_data:/sillytavern-data
+    depends_on:
+      studio_db:
+        condition: service_healthy
+      studio_redis:
+        condition: service_healthy
     environment:
       - ENVIRONMENT=production
+      - U2NET_HOME=/app/data/models/u2net
       # Wildcard defaults
       - WILDCARD_SOURCE_ROOT=/app/data/wildcards
       - WILDCARD_WORKSHOP_DATA_DIR=/app/data/wildcards
@@ -23,8 +60,9 @@ services:
       - MOVIE_TOOL_SCENARIO_ASSISTANT_BASE_URL=${MOVIE_TOOL_SCENARIO_ASSISTANT_BASE_URL:-http://host.docker.internal:5001/v1}
       - MOVIE_TOOL_SCENARIO_ASSISTANT_MODEL=${MOVIE_TOOL_SCENARIO_ASSISTANT_MODEL:-koboldcpp}
       - MOVIE_TOOL_IMAGE_MODEL_ROOT=${MOVIE_TOOL_IMAGE_MODEL_ROOT:-/app/data/models/images}
+      - MOVIE_TOOL_VIDEO_MODEL_ROOT=${MOVIE_TOOL_VIDEO_MODEL_ROOT:-/app/data/models/video}
       - MOVIE_TOOL_IMAGE_PROVIDER=${MOVIE_TOOL_IMAGE_PROVIDER:-comfyui}
-      - MOVIE_TOOL_IMAGE_DEFAULT_MODEL=${MOVIE_TOOL_IMAGE_DEFAULT_MODEL:-}
+      - MOVIE_TOOL_IMAGE_DEFAULT_MODEL=${MOVIE_TOOL_IMAGE_DEFAULT_MODEL:-Mklan-Noob4-DMD2_00001_.safetensors}
       - MOVIE_TOOL_COMFY_ENDPOINT=${MOVIE_TOOL_COMFY_ENDPOINT:-http://host.docker.internal:8188}
       - MOVIE_TOOL_COMFY_TIMEOUT_S=${MOVIE_TOOL_COMFY_TIMEOUT_S:-300}
       - MOVIE_TOOL_IMAGE_SAMPLER=${MOVIE_TOOL_IMAGE_SAMPLER:-LCM}
@@ -35,17 +73,29 @@ services:
       - STUDIO_DATA_ROOT=/app/data
       - STUDIO_CORS_ORIGINS=${STUDIO_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       - STUDIO_API_KEY=${STUDIO_API_KEY:-}
+      - STUDIO_DATABASE_URL=${STUDIO_DATABASE_URL:-postgresql+psycopg://mklan_studio:${STUDIO_POSTGRES_PASSWORD:-change-me}@studio_db:5432/${STUDIO_POSTGRES_DB:-mklan_studio}}
+      - STUDIO_REDIS_URL=${STUDIO_REDIS_URL:-redis://studio_redis:6379/0}
+      - STUDIO_JOBS_BACKEND=${STUDIO_JOBS_BACKEND:-arq}
+      - STUDIO_COPILOT_TIMEOUT_S=${STUDIO_COPILOT_TIMEOUT_S:-8}
+      - STUDIO_VIDEO_MODEL_ROOT=${STUDIO_VIDEO_MODEL_ROOT:-/app/data/models/video}
+      - STUDIO_VIDEO_OUTPUT_ROOT=${STUDIO_VIDEO_OUTPUT_ROOT:-/app/data/generated/video}
       - STUDIO_MODEL_UPLOAD_MAX_BYTES=${STUDIO_MODEL_UPLOAD_MAX_BYTES:-34359738368}
       - STUDIO_IMAGE_UPLOAD_MAX_BYTES=${STUDIO_IMAGE_UPLOAD_MAX_BYTES:-104857600}
       - STUDIO_DATASET_ZIP_MAX_BYTES=${STUDIO_DATASET_ZIP_MAX_BYTES:-2147483648}
-      - STUDIO_TRAINING_DRY_RUN=${STUDIO_TRAINING_DRY_RUN:-true}
+      - STUDIO_TRAINING_DRY_RUN=${STUDIO_TRAINING_DRY_RUN:-false}
       - STUDIO_SD_SCRIPTS_ROOT=${STUDIO_SD_SCRIPTS_ROOT:-/app/trainers/sd-scripts}
       - STUDIO_ACCELERATE_BIN=${STUDIO_ACCELERATE_BIN:-accelerate}
+      - STUDIO_SIMPLETUNER_ROOT=${STUDIO_SIMPLETUNER_ROOT:-/app/trainers/SimpleTuner}
+      - STUDIO_FLUX_TRAIN_SCRIPT=${STUDIO_FLUX_TRAIN_SCRIPT:-}
       - STUDIO_Z_IMAGE_TRAIN_SCRIPT=${STUDIO_Z_IMAGE_TRAIN_SCRIPT:-}
       - STUDIO_CAPTION_MODEL_ID=${STUDIO_CAPTION_MODEL_ID:-Salesforce/blip-image-captioning-base}
       - STUDIO_CAPTION_ALLOW_DOWNLOAD=${STUDIO_CAPTION_ALLOW_DOWNLOAD:-false}
       - STUDIO_DISABLE_LOCAL_CAPTIONING=${STUDIO_DISABLE_LOCAL_CAPTIONING:-false}
       - STUDIO_CAPTION_PROVIDER=${STUDIO_CAPTION_PROVIDER:-auto}
+      - STUDIO_FLORENCE_URL=${STUDIO_FLORENCE_URL:-http://studio_florence:8091}
+      - STUDIO_FLORENCE_MODEL_ID=${STUDIO_FLORENCE_MODEL_ID:-microsoft/Florence-2-base}
+      - STUDIO_FLORENCE_DEVICE=${STUDIO_FLORENCE_DEVICE:-auto}
+      - STUDIO_FLORENCE_ALLOW_DOWNLOAD=${STUDIO_FLORENCE_ALLOW_DOWNLOAD:-false}
       - STUDIO_CAPTION_CLIP_MODEL_ID=${STUDIO_CAPTION_CLIP_MODEL_ID:-OysterQAQ/DanbooruCLIP}
       - STUDIO_CAPTION_CLIP_MODEL_SOURCE=${STUDIO_CAPTION_CLIP_MODEL_SOURCE:-auto}
       - STUDIO_CAPTION_CLIP_ALLOW_DOWNLOAD=${STUDIO_CAPTION_CLIP_ALLOW_DOWNLOAD:-false}
@@ -73,12 +123,121 @@ services:
       - CARDS_SILLYTAVERN_DATA_ROOT=/sillytavern-data
       - SILLYTAVERN_PUBLIC_URL=${SILLYTAVERN_PUBLIC_URL:-http://localhost:8011}
       - SILLYTAVERN_INTERNAL_URL=http://sillytavern:8000
+      # Nvidia GPU runtime variables
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  studio_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.gpu
+    container_name: mklan-studio-worker
+    command: ["arq", "app.v2.worker.WorkerSettings"]
+    volumes:
+      - ./data:/app/data
+      - ./backend/app:/app/app:ro
+      - sillytavern_data:/sillytavern-data
+    depends_on:
+      studio_db:
+        condition: service_healthy
+      studio_redis:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=production
+      - U2NET_HOME=/app/data/models/u2net
+      - PYTHONPATH=/app
+      - STUDIO_DATA_ROOT=/app/data
+      - STUDIO_DATABASE_URL=${STUDIO_DATABASE_URL:-postgresql+psycopg://mklan_studio:${STUDIO_POSTGRES_PASSWORD:-change-me}@studio_db:5432/${STUDIO_POSTGRES_DB:-mklan_studio}}
+      - STUDIO_REDIS_URL=${STUDIO_REDIS_URL:-redis://studio_redis:6379/0}
+      - STUDIO_JOBS_BACKEND=${STUDIO_JOBS_BACKEND:-arq}
+      - STUDIO_VIDEO_MODEL_ROOT=${STUDIO_VIDEO_MODEL_ROOT:-/app/data/models/video}
+      - STUDIO_VIDEO_OUTPUT_ROOT=${STUDIO_VIDEO_OUTPUT_ROOT:-/app/data/generated/video}
+      - STUDIO_TRAINING_DRY_RUN=${STUDIO_TRAINING_DRY_RUN:-false}
+      - STUDIO_SD_SCRIPTS_ROOT=${STUDIO_SD_SCRIPTS_ROOT:-/app/trainers/sd-scripts}
+      - STUDIO_ACCELERATE_BIN=${STUDIO_ACCELERATE_BIN:-accelerate}
+      - STUDIO_SIMPLETUNER_ROOT=${STUDIO_SIMPLETUNER_ROOT:-/app/trainers/SimpleTuner}
+      - STUDIO_FLUX_TRAIN_SCRIPT=${STUDIO_FLUX_TRAIN_SCRIPT:-}
+      - STUDIO_Z_IMAGE_TRAIN_SCRIPT=${STUDIO_Z_IMAGE_TRAIN_SCRIPT:-}
+      - STUDIO_CAPTION_MODEL_ID=${STUDIO_CAPTION_MODEL_ID:-Salesforce/blip-image-captioning-base}
+      - STUDIO_CAPTION_ALLOW_DOWNLOAD=${STUDIO_CAPTION_ALLOW_DOWNLOAD:-false}
+      - STUDIO_DISABLE_LOCAL_CAPTIONING=${STUDIO_DISABLE_LOCAL_CAPTIONING:-false}
+      - STUDIO_CAPTION_PROVIDER=${STUDIO_CAPTION_PROVIDER:-auto}
+      - STUDIO_FLORENCE_URL=${STUDIO_FLORENCE_URL:-http://studio_florence:8091}
+      - STUDIO_FLORENCE_MODEL_ID=${STUDIO_FLORENCE_MODEL_ID:-microsoft/Florence-2-base}
+      - STUDIO_FLORENCE_DEVICE=${STUDIO_FLORENCE_DEVICE:-auto}
+      - STUDIO_FLORENCE_ALLOW_DOWNLOAD=${STUDIO_FLORENCE_ALLOW_DOWNLOAD:-false}
+      - STUDIO_CAPTION_CLIP_MODEL_ID=${STUDIO_CAPTION_CLIP_MODEL_ID:-OysterQAQ/DanbooruCLIP}
+      - STUDIO_CAPTION_CLIP_MODEL_SOURCE=${STUDIO_CAPTION_CLIP_MODEL_SOURCE:-auto}
+      - STUDIO_CAPTION_CLIP_ALLOW_DOWNLOAD=${STUDIO_CAPTION_CLIP_ALLOW_DOWNLOAD:-false}
+      - STUDIO_CAPTION_CLIP_CACHE_DIR=${STUDIO_CAPTION_CLIP_CACHE_DIR:-/app/data/models/captioning/hf-cache}
+      - STUDIO_CAPTION_CLIP_TAGS_PATH=${STUDIO_CAPTION_CLIP_TAGS_PATH:-/app/data/models/captioning/tag_vocab/default_tags.txt}
+      - STUDIO_CAPTION_CLIP_TOP_K=${STUDIO_CAPTION_CLIP_TOP_K:-24}
+      - STUDIO_CAPTION_CLIP_THRESHOLD=${STUDIO_CAPTION_CLIP_THRESHOLD:-0}
+      - STUDIO_CAPTION_CLIP_MAX_CANDIDATES=${STUDIO_CAPTION_CLIP_MAX_CANDIDATES:-256}
+      - STUDIO_CAPTION_CLIP_PROMPT_TEMPLATE=${STUDIO_CAPTION_CLIP_PROMPT_TEMPLATE:-{tag}}
+      - STUDIO_CAPTION_VLM_ENDPOINT=${STUDIO_CAPTION_VLM_ENDPOINT:-}
+      - STUDIO_CAPTION_VLM_MODEL=${STUDIO_CAPTION_VLM_MODEL:-}
+      - STUDIO_CAPTION_VLM_API_KEY=${STUDIO_CAPTION_VLM_API_KEY:-}
+      - STUDIO_CAPTION_VLM_TIMEOUT_S=${STUDIO_CAPTION_VLM_TIMEOUT_S:-120}
+      - STUDIO_CAPTION_VLM_PROMPT=${STUDIO_CAPTION_VLM_PROMPT:-}
+      - MOVIE_DATA_DIR=/app/data/movie
+      - MOVIE_DB=/app/data/movie/movie_tool.db
+      - MOVIE_TOOL_VIDEO_MODEL_ROOT=${MOVIE_TOOL_VIDEO_MODEL_ROOT:-/app/data/models/video}
+      - MOVIE_TOOL_COMFY_ENDPOINT=${MOVIE_TOOL_COMFY_ENDPOINT:-http://host.docker.internal:8188}
+      - MOVIE_TOOL_COMFY_TIMEOUT_S=${MOVIE_TOOL_COMFY_TIMEOUT_S:-300}
+      - MEDIA_INDEXER_INTERNAL_URL=${MEDIA_INDEXER_INTERNAL_URL:-http://media_indexer_backend:8000}
+      - MEDIA_INDEXER_TIMEOUT_S=${MEDIA_INDEXER_TIMEOUT_S:-10}
+      - MEDIA_INDEXER_AUTO_SYNC_GENERATED=${MEDIA_INDEXER_AUTO_SYNC_GENERATED:-true}
+      - MEDIA_INDEXER_AUTO_SCAN_MODE=${MEDIA_INDEXER_AUTO_SCAN_MODE:-metadata}
+      - MEDIA_INDEXER_GENERATED_SOURCE_NAME=${MEDIA_INDEXER_GENERATED_SOURCE_NAME:-Mklan Studio Generated}
+      - MEDIA_INDEXER_GENERATED_SOURCE_ROOT=${MEDIA_INDEXER_GENERATED_SOURCE_ROOT:-/data/sources/generated}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  studio_florence:
+    build:
+      context: ./services/florence2
+      dockerfile: Dockerfile
+    container_name: mklan-studio-florence
+    profiles: ["florence"]
+    restart: unless-stopped
+    environment:
+      - STUDIO_FLORENCE_MODEL_ID=${STUDIO_FLORENCE_MODEL_ID:-microsoft/Florence-2-base}
+      - STUDIO_FLORENCE_DEVICE=${STUDIO_FLORENCE_DEVICE:-auto}
+      - STUDIO_FLORENCE_ALLOW_DOWNLOAD=${STUDIO_FLORENCE_ALLOW_DOWNLOAD:-false}
+      - STUDIO_FLORENCE_MOCK=${STUDIO_FLORENCE_MOCK:-false}
+      - HF_HOME=/models/hf
+    volumes:
+      - ./data/models/captioning:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=5).read()"]
+      interval: 20s
+      timeout: 8s
+      retries: 6
+
   sillytavern:
     image: ghcr.io/sillytavern/sillytavern:${SILLYTAVERN_VERSION:-latest}
+    container_name: mklan-studio-sillytavern
     restart: unless-stopped
     environment:
       NODE_ENV: production
@@ -106,6 +265,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    container_name: mklan-studio-frontend
     ports:
       - "5173:80"
     depends_on:
@@ -114,6 +274,7 @@ services:
 
   media_db:
     image: pgvector/pgvector:pg16
+    container_name: media_indexer_db
     profiles: ["media-indexer"]
     restart: unless-stopped
     environment:
@@ -132,14 +293,15 @@ services:
     build:
       context: ./media-indexer
       dockerfile: infra/backend.Dockerfile
+    container_name: media_indexer_backend
     profiles: ["media-indexer"]
     restart: unless-stopped
     environment:
       APP_ENV: ${MEDIA_INDEXER_APP_ENV:-production}
       DATABASE_URL: postgresql+psycopg://media_indexer:${MEDIA_INDEXER_POSTGRES_PASSWORD:-change-me}@media_db:5432/media_indexer
       FRONTEND_ORIGIN: http://localhost:5173
-      ALLOWED_SOURCE_ROOTS: /data/sources
-      WINDOWS_HOST_MOUNT_ROOT: ""
+      ALLOWED_SOURCE_ROOTS: /data/sources,/hostfs/c,/hostfs/d,/hostfs/e,/hostfs/f,/hostfs/h,/hostfs/i,/hostfs/j
+      WINDOWS_HOST_MOUNT_ROOT: /hostfs
       SESSION_SECRET: ${MEDIA_INDEXER_SESSION_SECRET:-change-me-in-production}
       GENERATED_SOURCE_NAME: ${MEDIA_INDEXER_GENERATED_SOURCE_NAME:-Mklan Studio Generated}
       GENERATED_SOURCE_ROOT: ${MEDIA_INDEXER_GENERATED_SOURCE_ROOT:-/data/sources/generated}
@@ -151,13 +313,19 @@ services:
     volumes:
       - ./data/generated:/data/sources/generated:ro
       - ./data/media_previews:/workspace/storage/previews
-      # Add machine-specific media mounts in docker-compose.override.yml.
-      # Example target path: /data/sources/photos
+      - 'C:\:/hostfs/c:ro'
+      - 'D:\:/hostfs/d:ro'
+      - 'E:\:/hostfs/e:ro'
+      - 'F:\:/hostfs/f:ro'
+      - 'H:\:/hostfs/h:ro'
+      - 'I:\:/hostfs/i:ro'
+      - 'J:\:/hostfs/j:ro'
 
   media_worker:
     build:
       context: ./media-indexer
       dockerfile: infra/worker.Dockerfile
+    container_name: media_indexer_worker
     profiles: ["media-indexer"]
     restart: unless-stopped
     environment:
@@ -165,8 +333,8 @@ services:
       DATABASE_URL: postgresql+psycopg://media_indexer:${MEDIA_INDEXER_POSTGRES_PASSWORD:-change-me}@media_db:5432/media_indexer
       SESSION_SECRET: ${MEDIA_INDEXER_SESSION_SECRET:-change-me-in-production}
       PREVIEW_ROOT: /workspace/storage/previews
-      ALLOWED_SOURCE_ROOTS: /data/sources
-      WINDOWS_HOST_MOUNT_ROOT: ""
+      ALLOWED_SOURCE_ROOTS: /data/sources,/hostfs/c,/hostfs/d,/hostfs/e,/hostfs/f,/hostfs/h,/hostfs/i,/hostfs/j
+      WINDOWS_HOST_MOUNT_ROOT: /hostfs
       GENERATED_SOURCE_NAME: ${MEDIA_INDEXER_GENERATED_SOURCE_NAME:-Mklan Studio Generated}
       GENERATED_SOURCE_ROOT: ${MEDIA_INDEXER_GENERATED_SOURCE_ROOT:-/data/sources/generated}
       WORKER_POLL_INTERVAL_SECONDS: 5
@@ -182,10 +350,20 @@ services:
       - ./data/generated:/data/sources/generated:ro
       - ./data/media_previews:/workspace/storage/previews
       - ./data/hf_cache:/root/.cache/huggingface
-      # Mirror machine-specific media mounts from docker-compose.override.yml.
-      # Example target path: /data/sources/photos
+      - 'C:\:/hostfs/c:ro'
+      - 'D:\:/hostfs/d:ro'
+      - 'E:\:/hostfs/e:ro'
+      - 'F:\:/hostfs/f:ro'
+      - 'H:\:/hostfs/h:ro'
+      - 'I:\:/hostfs/i:ro'
+      - 'J:\:/hostfs/j:ro'
+
+networks:
+  default:
+    name: mklan-studio-network
 
 volumes:
+  studio_redis_data:
   sillytavern_config:
   sillytavern_data:
   sillytavern_plugins:

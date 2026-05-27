@@ -5,6 +5,7 @@ import {
   Bot,
   Check,
   Cpu,
+  Download,
   Image as ImageIcon,
   Loader2,
   Play,
@@ -17,7 +18,7 @@ import { useUiPreferences } from '../hooks/useUiPreferences';
 
 const API = '/api/studio';
 
-type SettingsTab = 'connections' | 'models' | 'sandbox';
+type SettingsTab = 'connections' | 'models' | 'packages' | 'sandbox';
 type LlmProvider =
   | 'ollama'
   | 'koboldcpp'
@@ -61,6 +62,12 @@ interface ModelInventoryItem {
   size: number;
   path?: string;
   provider?: string;
+}
+
+interface WorkspaceRead {
+  id: string;
+  name: string;
+  active: boolean;
 }
 
 const defaultGenerationDefaults: GenerationDefaults = {
@@ -150,6 +157,7 @@ const providerPresets: Record<
 const tabConfig: Array<{ id: SettingsTab; label: string; icon: typeof Server }> = [
   { id: 'connections', label: 'Connections', icon: Server },
   { id: 'models', label: 'Models', icon: Cpu },
+  { id: 'packages', label: 'Packages', icon: Download },
 ];
 
 const samplerOptions = ['Euler a', 'LCM', 'RES-Multistep', 'DPM++ 2S a', 'DPM++ SDE', 'DPM++ 2M'];
@@ -255,6 +263,9 @@ export function StudioSettings() {
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceRead | null>(null);
+  const [workspacePackageFile, setWorkspacePackageFile] = useState<File | null>(null);
+  const [workspacePackageBusy, setWorkspacePackageBusy] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [sandboxSynced, setSandboxSynced] = useState(false);
@@ -262,6 +273,7 @@ export function StudioSettings() {
   useEffect(() => {
     void fetchSettings();
     void fetchModels();
+    void fetchActiveWorkspace();
   }, []);
 
   useEffect(() => {
@@ -269,6 +281,7 @@ export function StudioSettings() {
     const tabParam = params.get('tab');
     if (tabParam === 'llm' || tabParam === 'connections') setActiveTab('connections');
     else if (tabParam === 'models') setActiveTab('models');
+    else if (tabParam === 'packages') setActiveTab('packages');
     else if (tabParam === 'sandbox') navigate('/generation', { replace: true });
   }, [location.search, navigate]);
 
@@ -295,6 +308,70 @@ export function StudioSettings() {
       setModelsList(payload.models || []);
     } catch {
       setModelsList([]);
+    }
+  };
+
+  const fetchActiveWorkspace = async () => {
+    try {
+      const response = await fetch('/api/workspaces');
+      const payload = await response.json();
+      const activeId = payload.active_workspace_id || 'default';
+      setActiveWorkspace((payload.workspaces || []).find((workspace: WorkspaceRead) => workspace.id === activeId) || null);
+    } catch {
+      setActiveWorkspace({ id: 'default', name: 'Default Workspace', active: true });
+    }
+  };
+
+  const exportWorkspacePackage = async () => {
+    if (!activeWorkspace) return;
+    setWorkspacePackageBusy(true);
+    setError('');
+    setSuccessMsg('');
+    try {
+      const response = await fetch(`/api/workspaces/${activeWorkspace.id}/export.zip`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || 'Workspace export failed.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${activeWorkspace.name.replace(/[^a-z0-9_.-]+/gi, '-').toLowerCase() || 'workspace'}.zip`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setSuccessMsg('Workspace package exported.');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setWorkspacePackageBusy(false);
+    }
+  };
+
+  const importWorkspacePackage = async () => {
+    if (!workspacePackageFile) return;
+    setWorkspacePackageBusy(true);
+    setError('');
+    setSuccessMsg('');
+    const formData = new FormData();
+    formData.append('file', workspacePackageFile);
+    formData.append('mode', 'create_new');
+    try {
+      const response = await fetch('/api/workspaces/import', {
+        method: 'POST',
+        body: formData,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || 'Workspace import failed.');
+      }
+      setSuccessMsg(`Imported workspace ${payload.workspace?.name || ''}`.trim());
+      setWorkspacePackageFile(null);
+      await fetchActiveWorkspace();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setWorkspacePackageBusy(false);
     }
   };
 
@@ -918,6 +995,59 @@ export function StudioSettings() {
               <button onClick={() => syncSandboxToDefaults(settings.image.defaults)} style={{ alignSelf: 'flex-start' }}>
                 <ImageIcon size={14} />
                 Load Defaults Into Generation Defaults
+              </button>
+            </SectionCard>
+          </div>
+        ) : null}
+
+        {activeTab === 'packages' ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))', gap: '1rem' }}>
+            <SectionCard
+              title="Workspace Export"
+              subtitle="Create a V2 workspace package with platform metadata, workflow templates, registered generated assets, and selected generated files."
+              icon={Download}
+            >
+              <div style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '0.9rem', background: 'rgba(0,0,0,0.14)' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Active Workspace</div>
+                <strong style={{ wordBreak: 'break-word' }}>{activeWorkspace?.name || 'Default Workspace'}</strong>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.25rem', wordBreak: 'break-word' }}>{activeWorkspace?.id || 'default'}</div>
+              </div>
+              <button onClick={() => void exportWorkspacePackage()} disabled={workspacePackageBusy || !activeWorkspace} className="primary-button" style={{ alignSelf: 'flex-start' }}>
+                {workspacePackageBusy ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                Export ZIP
+              </button>
+            </SectionCard>
+
+            <SectionCard
+              title="Workspace Import"
+              subtitle="Import a package as a new workspace. Legacy Wildcards, Movie, and Cards SQLite stores are left untouched."
+              icon={UploadCloud}
+            >
+              <label
+                style={{
+                  border: '2px dashed var(--border-color)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '1.4rem 1rem',
+                  textAlign: 'center',
+                  cursor: 'pointer',
+                  background: 'rgba(0,0,0,0.1)',
+                  position: 'relative',
+                }}
+              >
+                <input
+                  type="file"
+                  accept=".zip,application/zip"
+                  onChange={(event) => setWorkspacePackageFile(event.target.files?.[0] || null)}
+                  disabled={workspacePackageBusy}
+                  style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }}
+                />
+                <UploadCloud size={30} color="var(--text-secondary)" style={{ marginBottom: '0.65rem', opacity: 0.7 }} />
+                <div style={{ fontWeight: 600, fontSize: '0.92rem', color: '#fff', marginBottom: '0.3rem' }}>{workspacePackageFile?.name || 'Choose workspace package'}</div>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Creates and activates a remapped workspace</span>
+              </label>
+              <button onClick={() => void importWorkspacePackage()} disabled={workspacePackageBusy || !workspacePackageFile} className="primary-button" style={{ alignSelf: 'flex-start' }}>
+                {workspacePackageBusy ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
+                Import ZIP
               </button>
             </SectionCard>
           </div>

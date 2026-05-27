@@ -81,18 +81,18 @@ class MovieRepository:
                     p.*,
                     CASE
                         WHEN p.workflow_version >= 2 THEN (
-                            SELECT COUNT(*) FROM story_scenes ss WHERE ss.project_id = p.id
+                            SELECT COUNT(*) FROM movie_story_scenes ss WHERE ss.project_id = p.id
                         )
                         ELSE (
-                            SELECT COUNT(*) FROM scenes s WHERE s.project_id = p.id
+                            SELECT COUNT(*) FROM movie_scenes s WHERE s.project_id = p.id
                         )
                     END AS scene_count,
                     (
                         SELECT COUNT(*)
-                        FROM scenes s
+                        FROM movie_scenes s
                         WHERE s.project_id = p.id AND s.story_scene_id IS NULL
                     ) AS legacy_sequence_count
-                FROM projects p
+                FROM movie_projects p
                 {where_clause}
                 ORDER BY p.updated_at DESC
                 """
@@ -105,15 +105,15 @@ class MovieRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO projects (
+                INSERT INTO movie_projects (
                     id, name, scenario_text, genre, tone, target_duration_s,
                     output_width, output_height, output_fps, aspect_ratio,
                     workflow_version, style_anchor_text, model_settings_override_json, opening_image_prompt_text,
                     opening_image_relative_path, opening_image_original_filename,
                     opening_image_mime_type, opening_image_size_bytes,
                     opening_image_uploaded_at, beat_board_status, archived_at, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     project_id,
@@ -149,7 +149,7 @@ class MovieRepository:
         defaults = build_default_model_settings(self.settings, legacy_runtime)
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT value_text FROM app_settings WHERE key = ?",
+                "SELECT value_text FROM movie_app_settings WHERE key = %s AND workspace_id = \'default\'",
                 (self.MODEL_SETTINGS_KEY,),
             ).fetchone()
         raw_settings = _loads(row["value_text"]) if row is not None else {}
@@ -170,7 +170,7 @@ class MovieRepository:
     def get_media_generation_settings(self) -> dict:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT value_text FROM app_settings WHERE key = ?",
+                "SELECT value_text FROM movie_app_settings WHERE key = %s AND workspace_id = \'default\'",
                 (self.MEDIA_SETTINGS_KEY,),
             ).fetchone()
         raw_settings = _loads(row["value_text"]) if row is not None else {}
@@ -187,7 +187,7 @@ class MovieRepository:
     def get_project_model_settings_override(self, project_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT model_settings_override_json FROM projects WHERE id = ?",
+                "SELECT model_settings_override_json FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
         if row is None:
@@ -200,9 +200,9 @@ class MovieRepository:
         with self.database.connect() as connection:
             cursor = connection.execute(
                 """
-                UPDATE projects
-                SET model_settings_override_json = ?, updated_at = ?
-                WHERE id = ?
+                UPDATE movie_projects
+                SET model_settings_override_json = %s, updated_at = %s
+                WHERE id = %s AND workspace_id = \'default\'
                 """,
                 (json.dumps(payload), now, project_id),
             )
@@ -262,7 +262,7 @@ class MovieRepository:
     def _get_legacy_assistant_settings_from_store(self) -> dict:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT key, value_text FROM app_settings WHERE key IN (?, ?, ?, ?, ?)",
+                "SELECT key, value_text FROM movie_app_settings WHERE key IN (%s, %s, %s, %s, %s)",
                 tuple(self.ASSISTANT_SETTING_KEYS.values()),
             ).fetchall()
         stored = {row["key"]: row["value_text"] for row in rows}
@@ -284,8 +284,8 @@ class MovieRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO app_settings (key, value_text, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO movie_app_settings (key, value_text, updated_at, workspace_id)
+                VALUES (%s, %s, %s, \'default\')
                 ON CONFLICT(key) DO UPDATE SET
                     value_text = excluded.value_text,
                     updated_at = excluded.updated_at
@@ -301,7 +301,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             project_row = connection.execute(
-                "SELECT * FROM projects WHERE id = ?",
+                "SELECT * FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if project_row is None:
@@ -312,7 +312,7 @@ class MovieRepository:
                 and "beat_board_status" not in clean_updates
             ):
                 beat_count_row = connection.execute(
-                    "SELECT COUNT(*) AS count FROM story_beats WHERE project_id = ?",
+                    "SELECT COUNT(*) AS count FROM movie_story_beats WHERE project_id = %s AND workspace_id = \'default\'",
                     (project_id,),
                 ).fetchone()
                 clean_updates["beat_board_status"] = "stale" if int(beat_count_row["count"]) > 0 else "empty"
@@ -330,14 +330,14 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT archived_at FROM projects WHERE id = ?",
+                "SELECT archived_at FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if row is None:
                 return None
             archived_at = row["archived_at"] or now
             connection.execute(
-                "UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET archived_at = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (archived_at, now, project_id),
             )
         return self.get_project_detail(project_id)
@@ -346,7 +346,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE projects SET archived_at = NULL, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET archived_at = NULL, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, project_id),
             )
             if cursor.rowcount == 0:
@@ -357,14 +357,14 @@ class MovieRepository:
         project_root = self.settings.projects_root / project_id
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT archived_at FROM projects WHERE id = ?",
+                "SELECT archived_at FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if row is None:
                 return None
             if not row["archived_at"]:
                 return False
-            connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            connection.execute("DELETE FROM movie_projects WHERE id = %s AND workspace_id = \'default\'", (project_id,))
         if project_root.exists():
             shutil.rmtree(project_root, ignore_errors=False)
         return True
@@ -372,18 +372,18 @@ class MovieRepository:
     def get_project_detail(self, project_id: str) -> dict | None:
         with self.database.connect() as connection:
             project_row = connection.execute(
-                "SELECT * FROM projects WHERE id = ?",
+                "SELECT * FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if project_row is None:
                 return None
 
             job_rows = connection.execute(
-                "SELECT * FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 10",
+                "SELECT * FROM movie_jobs WHERE project_id = %s AND workspace_id = \'default\' ORDER BY created_at DESC LIMIT 10",
                 (project_id,),
             ).fetchall()
             export_rows = connection.execute(
-                "SELECT * FROM export_assets WHERE project_id = ? ORDER BY created_at DESC",
+                "SELECT * FROM movie_export_assets WHERE project_id = %s AND workspace_id = \'default\' ORDER BY created_at DESC",
                 (project_id,),
             ).fetchall()
 
@@ -391,8 +391,8 @@ class MovieRepository:
             beat_rows = connection.execute(
                 """
                 SELECT *
-                FROM story_beats
-                WHERE project_id = ?
+                FROM movie_story_beats
+                WHERE project_id = %s AND workspace_id = \'default\'
                 ORDER BY act_index ASC, order_index ASC, created_at ASC
                 """,
                 (project_id,),
@@ -406,8 +406,8 @@ class MovieRepository:
             char_rows = connection.execute(
                 """
                 SELECT *
-                FROM project_characters
-                WHERE project_id = ?
+                FROM movie_project_characters
+                WHERE project_id = %s AND workspace_id = \'default\'
                 ORDER BY order_index ASC, created_at ASC
                 """,
                 (project_id,),
@@ -415,14 +415,14 @@ class MovieRepository:
             project["characters"] = [self._project_character_from_row(row) for row in char_rows]
             if project["workflow_version"] >= 2:
                 scene_rows = connection.execute(
-                    "SELECT * FROM story_scenes WHERE project_id = ? ORDER BY order_index ASC, created_at ASC",
+                    "SELECT * FROM movie_story_scenes WHERE project_id = %s AND workspace_id = \'default\' ORDER BY order_index ASC, created_at ASC",
                     (project_id,),
                 ).fetchall()
                 sequence_rows = connection.execute(
                     """
                     SELECT *
-                    FROM scenes
-                    WHERE project_id = ? AND story_scene_id IS NOT NULL
+                    FROM movie_scenes
+                    WHERE project_id = %s AND workspace_id = \'default\' AND story_scene_id IS NOT NULL
                     ORDER BY absolute_order ASC, order_index ASC, created_at ASC
                     """,
                     (project_id,),
@@ -430,8 +430,8 @@ class MovieRepository:
                 continuity_review_rows = connection.execute(
                     """
                     SELECT *
-                    FROM continuity_reviews
-                    WHERE project_id = ?
+                    FROM movie_continuity_reviews
+                    WHERE project_id = %s AND workspace_id = \'default\'
                     ORDER BY updated_at DESC
                     """,
                     (project_id,),
@@ -439,8 +439,8 @@ class MovieRepository:
                 scene_image_variant_rows = connection.execute(
                     """
                     SELECT *
-                    FROM scene_image_variants
-                    WHERE project_id = ?
+                    FROM movie_scene_image_variants
+                    WHERE project_id = %s AND workspace_id = \'default\'
                     ORDER BY created_at DESC
                     """,
                     (project_id,),
@@ -448,8 +448,8 @@ class MovieRepository:
                 sequence_video_variant_rows = connection.execute(
                     """
                     SELECT *
-                    FROM sequence_video_variants
-                    WHERE project_id = ?
+                    FROM movie_sequence_video_variants
+                    WHERE project_id = %s AND workspace_id = \'default\'
                     ORDER BY created_at DESC
                     """,
                     (project_id,),
@@ -487,8 +487,8 @@ class MovieRepository:
                 legacy_sequence_rows = connection.execute(
                     """
                     SELECT *
-                    FROM scenes
-                    WHERE project_id = ? AND story_scene_id IS NULL
+                    FROM movie_scenes
+                    WHERE project_id = %s AND workspace_id = \'default\' AND story_scene_id IS NULL
                     ORDER BY order_index ASC, created_at ASC
                     """,
                     (project_id,),
@@ -504,7 +504,7 @@ class MovieRepository:
     def get_project_record(self, project_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM projects WHERE id = ?",
+                "SELECT * FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
         return None if row is None else self._project_from_row(row)
@@ -526,8 +526,8 @@ class MovieRepository:
             rows = connection.execute(
                 """
                 SELECT *
-                FROM story_beats
-                WHERE project_id = ?
+                FROM movie_story_beats
+                WHERE project_id = %s AND workspace_id = \'default\'
                 ORDER BY act_index ASC, order_index ASC, created_at ASC
                 """,
                 (project_id,),
@@ -537,7 +537,7 @@ class MovieRepository:
     def get_story_beat(self, beat_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM story_beats WHERE id = ?",
+                "SELECT * FROM movie_story_beats WHERE id = %s AND workspace_id = \'default\'",
                 (beat_id,),
             ).fetchone()
         return None if row is None else self._story_beat_from_row(row)
@@ -546,20 +546,20 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             project_row = connection.execute(
-                "SELECT id FROM projects WHERE id = ?",
+                "SELECT id FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if project_row is None:
                 return []
-            connection.execute("DELETE FROM story_beats WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM movie_story_beats WHERE project_id = %s AND workspace_id = \'default\'", (project_id,))
             for beat in beats:
                 connection.execute(
                     """
-                    INSERT INTO story_beats (
+                    INSERT INTO movie_story_beats (
                         id, project_id, act_index, order_index, title,
                         summary_text, purpose_text, source, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                     """,
                     (
                         str(uuid.uuid4()),
@@ -575,7 +575,7 @@ class MovieRepository:
                     ),
                 )
             connection.execute(
-                "UPDATE projects SET beat_board_status = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET beat_board_status = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (status if beats else "empty", now, project_id),
             )
         return self.list_story_beats(project_id)
@@ -584,7 +584,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             project_row = connection.execute(
-                "SELECT id FROM projects WHERE id = ?",
+                "SELECT id FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if project_row is None:
@@ -592,19 +592,19 @@ class MovieRepository:
             order_row = connection.execute(
                 """
                 SELECT COALESCE(MAX(order_index), 0) AS max_order
-                FROM story_beats
-                WHERE project_id = ? AND act_index = ?
+                FROM movie_story_beats
+                WHERE project_id = %s AND workspace_id = \'default\' AND act_index = %s
                 """,
                 (project_id, int(payload["act_index"])),
             ).fetchone()
             beat_id = str(uuid.uuid4())
             connection.execute(
                 """
-                INSERT INTO story_beats (
+                INSERT INTO movie_story_beats (
                     id, project_id, act_index, order_index, title,
                     summary_text, purpose_text, source, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     beat_id,
@@ -620,7 +620,7 @@ class MovieRepository:
                 ),
             )
             connection.execute(
-                "UPDATE projects SET beat_board_status = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET beat_board_status = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 ("edited", now, project_id),
             )
         return self.get_story_beat(beat_id)
@@ -632,7 +632,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT project_id FROM story_beats WHERE id = ?",
+                "SELECT project_id FROM movie_story_beats WHERE id = %s AND workspace_id = \'default\'",
                 (beat_id,),
             ).fetchone()
             if row is None:
@@ -640,17 +640,17 @@ class MovieRepository:
             assignments = []
             values: list[object] = []
             for key, value in clean_updates.items():
-                assignments.append(f"{key} = ?")
+                assignments.append(f"{key} = %s")
                 values.append(value)
-            assignments.append("updated_at = ?")
+            assignments.append("updated_at = %s")
             values.append(now)
             values.append(beat_id)
             connection.execute(
-                f"UPDATE story_beats SET {', '.join(assignments)} WHERE id = ?",
+                f"UPDATE movie_story_beats SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'",
                 values,
             )
             connection.execute(
-                "UPDATE projects SET beat_board_status = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET beat_board_status = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 ("edited", now, row["project_id"]),
             )
             if "act_index" in clean_updates or "order_index" in clean_updates:
@@ -661,7 +661,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             project_row = connection.execute(
-                "SELECT id FROM projects WHERE id = ?",
+                "SELECT id FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if project_row is None:
@@ -669,15 +669,15 @@ class MovieRepository:
             for beat in beats:
                 connection.execute(
                     """
-                    UPDATE story_beats
-                    SET act_index = ?, order_index = ?, updated_at = ?
-                    WHERE id = ? AND project_id = ?
+                    UPDATE movie_story_beats
+                    SET act_index = %s, order_index = %s, updated_at = %s
+                    WHERE id = %s AND workspace_id = \'default\' AND project_id = %s
                     """,
                     (int(beat["act_index"]), int(beat["order_index"]), now, beat["beat_id"], project_id),
                 )
             self._normalize_story_beats(connection, project_id)
             connection.execute(
-                "UPDATE projects SET beat_board_status = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET beat_board_status = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 ("edited", now, project_id),
             )
         return self.list_story_beats(project_id)
@@ -686,21 +686,21 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT project_id FROM story_beats WHERE id = ?",
+                "SELECT project_id FROM movie_story_beats WHERE id = %s AND workspace_id = \'default\'",
                 (beat_id,),
             ).fetchone()
             if row is None:
                 return False
             project_id = row["project_id"]
-            connection.execute("DELETE FROM story_beats WHERE id = ?", (beat_id,))
+            connection.execute("DELETE FROM movie_story_beats WHERE id = %s AND workspace_id = \'default\'", (beat_id,))
             self._normalize_story_beats(connection, project_id)
             beat_count_row = connection.execute(
-                "SELECT COUNT(*) AS count FROM story_beats WHERE project_id = ?",
+                "SELECT COUNT(*) AS count FROM movie_story_beats WHERE project_id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             next_status = "edited" if int(beat_count_row["count"]) > 0 else "empty"
             connection.execute(
-                "UPDATE projects SET beat_board_status = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET beat_board_status = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (next_status, now, project_id),
             )
         return True
@@ -725,8 +725,8 @@ class MovieRepository:
             rows = connection.execute(
                 """
                 SELECT *
-                FROM project_characters
-                WHERE project_id = ?
+                FROM movie_project_characters
+                WHERE project_id = %s AND workspace_id = \'default\'
                 ORDER BY order_index ASC, created_at ASC
                 """,
                 (project_id,),
@@ -736,7 +736,7 @@ class MovieRepository:
     def get_project_character(self, character_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM project_characters WHERE id = ?",
+                "SELECT * FROM movie_project_characters WHERE id = %s AND workspace_id = \'default\'",
                 (character_id,),
             ).fetchone()
         return None if row is None else self._project_character_from_row(row)
@@ -745,7 +745,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             project_row = connection.execute(
-                "SELECT id FROM projects WHERE id = ?",
+                "SELECT id FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
             if project_row is None:
@@ -753,20 +753,20 @@ class MovieRepository:
             order_row = connection.execute(
                 """
                 SELECT COALESCE(MAX(order_index), 0) AS max_order
-                FROM project_characters
-                WHERE project_id = ?
+                FROM movie_project_characters
+                WHERE project_id = %s AND workspace_id = \'default\'
                 """,
                 (project_id,),
             ).fetchone()
             character_id = str(uuid.uuid4())
             connection.execute(
                 """
-                INSERT INTO project_characters (
+                INSERT INTO movie_project_characters (
                     id, project_id, name, role_summary, prompt_tags, order_index, 
                     portrait_image_url, cowboyshot_image_url, fullbody_image_url,
                     created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     character_id,
@@ -791,7 +791,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT project_id FROM project_characters WHERE id = ?",
+                "SELECT project_id FROM movie_project_characters WHERE id = %s AND workspace_id = \'default\'",
                 (character_id,),
             ).fetchone()
             if row is None:
@@ -799,13 +799,13 @@ class MovieRepository:
             assignments = []
             values: list[object] = []
             for key, value in clean_updates.items():
-                assignments.append(f"{key} = ?")
+                assignments.append(f"{key} = %s")
                 values.append(value)
-            assignments.append("updated_at = ?")
+            assignments.append("updated_at = %s")
             values.append(now)
             values.append(character_id)
             connection.execute(
-                f"UPDATE project_characters SET {', '.join(assignments)} WHERE id = ?",
+                f"UPDATE movie_project_characters SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'",
                 values,
             )
             if "order_index" in clean_updates:
@@ -815,28 +815,28 @@ class MovieRepository:
     def delete_project_character(self, character_id: str) -> bool:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT project_id FROM project_characters WHERE id = ?",
+                "SELECT project_id FROM movie_project_characters WHERE id = %s AND workspace_id = \'default\'",
                 (character_id,),
             ).fetchone()
             if row is None:
                 return False
-            connection.execute("DELETE FROM project_characters WHERE id = ?", (character_id,))
+            connection.execute("DELETE FROM movie_project_characters WHERE id = %s AND workspace_id = \'default\'", (character_id,))
             self._normalize_project_characters(connection, row["project_id"])
         return True
 
     def replace_project_characters(self, project_id: str, characters: list[dict]) -> list[dict]:
         now = utc_now_iso()
         with self.database.connect() as connection:
-            connection.execute("DELETE FROM project_characters WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM movie_project_characters WHERE project_id = %s AND workspace_id = \'default\'", (project_id,))
             for index, char in enumerate(characters, start=1):
                 connection.execute(
                     """
-                    INSERT INTO project_characters (
+                    INSERT INTO movie_project_characters (
                         id, project_id, name, role_summary, prompt_tags, order_index, 
                         portrait_image_url, cowboyshot_image_url, fullbody_image_url,
                         created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                     """,
                     (
                         str(uuid.uuid4()),
@@ -857,20 +857,20 @@ class MovieRepository:
     def replace_story_scenes(self, project_id: str, scenes: list[dict]) -> list[dict]:
         now = utc_now_iso()
         with self.database.connect() as connection:
-            connection.execute("DELETE FROM scenes WHERE project_id = ? AND story_scene_id IS NOT NULL", (project_id,))
-            connection.execute("DELETE FROM story_scenes WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM movie_scenes WHERE project_id = %s AND workspace_id = \'default\' AND story_scene_id IS NOT NULL", (project_id,))
+            connection.execute("DELETE FROM movie_story_scenes WHERE project_id = %s AND workspace_id = \'default\'", (project_id,))
             for index, scene in enumerate(scenes, start=1):
                 scene_id = str(uuid.uuid4())
                 connection.execute(
                     """
-                    INSERT INTO story_scenes (
+                    INSERT INTO movie_story_scenes (
                         id, project_id, order_index, title, target_duration_s,
                         narrative_text, duration_locked, first_image_prompt_text,
                         first_image_relative_path, first_image_original_filename,
                         first_image_mime_type, first_image_size_bytes,
                         first_image_uploaded_at, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                     """,
                     (
                         scene_id,
@@ -891,7 +891,7 @@ class MovieRepository:
                     ),
                 )
             connection.execute(
-                "UPDATE projects SET workflow_version = 2, updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET workflow_version = 2, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, project_id),
             )
         detail = self.get_project_detail(project_id)
@@ -900,7 +900,7 @@ class MovieRepository:
     def get_story_scene(self, scene_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM story_scenes WHERE id = ?",
+                "SELECT * FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
         if row is None:
@@ -920,7 +920,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             scene_row = connection.execute(
-                "SELECT project_id, target_duration_s FROM story_scenes WHERE id = ?",
+                "SELECT project_id, target_duration_s FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
             if scene_row is None:
@@ -941,7 +941,7 @@ class MovieRepository:
                 )
             else:
                 connection.execute(
-                    "UPDATE projects SET updated_at = ? WHERE id = ?",
+                    "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                     (now, project_id),
                 )
             if any(
@@ -957,7 +957,7 @@ class MovieRepository:
                     "first_image_uploaded_at",
                 }
             ):
-                connection.execute("DELETE FROM continuity_reviews WHERE scene_id = ?", (scene_id,))
+                connection.execute("DELETE FROM movie_continuity_reviews WHERE scene_id = %s AND workspace_id = \'default\'", (scene_id,))
         return self.get_story_scene(scene_id)
 
     def set_story_scene_first_image_asset(
@@ -992,8 +992,8 @@ class MovieRepository:
             rows = connection.execute(
                 """
                 SELECT *
-                FROM scene_image_variants
-                WHERE scene_id = ?
+                FROM movie_scene_image_variants
+                WHERE scene_id = %s AND workspace_id = \'default\'
                 ORDER BY created_at DESC
                 """,
                 (scene_id,),
@@ -1017,18 +1017,18 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             scene_row = connection.execute(
-                "SELECT project_id FROM story_scenes WHERE id = ?",
+                "SELECT project_id FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
             if scene_row is None:
                 raise RuntimeError("Scene not found for generated image variant.")
             connection.execute(
                 """
-                INSERT INTO scene_image_variants (
+                INSERT INTO movie_scene_image_variants (
                     id, project_id, scene_id, provider, model_name, seed, prompt_text,
                     relative_path, original_filename, mime_type, size_bytes, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     variant_id,
@@ -1046,11 +1046,11 @@ class MovieRepository:
                 ),
             )
             connection.execute(
-                "UPDATE story_scenes SET image_generation_status = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_story_scenes SET image_generation_status = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 ("generated", now, scene_id),
             )
             connection.execute(
-                "UPDATE projects SET updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, scene_row["project_id"]),
             )
         variants = self.list_scene_image_variants(scene_id)
@@ -1059,7 +1059,7 @@ class MovieRepository:
     def approve_scene_image_variant(self, scene_id: str, asset_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM scene_image_variants WHERE id = ? AND scene_id = ?",
+                "SELECT * FROM movie_scene_image_variants WHERE id = %s AND workspace_id = \'default\' AND scene_id = %s",
                 (asset_id, scene_id),
             ).fetchone()
             if row is None:
@@ -1077,18 +1077,18 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             scene_row = connection.execute(
-                "SELECT project_id FROM story_scenes WHERE id = ?",
+                "SELECT project_id FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
             if scene_row is None:
                 return []
             project_id = scene_row["project_id"]
-            connection.execute("DELETE FROM scenes WHERE story_scene_id = ?", (scene_id,))
+            connection.execute("DELETE FROM movie_scenes WHERE story_scene_id = %s", (scene_id,))
             for index, sequence in enumerate(sequences, start=1):
                 sequence_id = str(uuid.uuid4())
                 connection.execute(
                     """
-                    INSERT INTO scenes (
+                    INSERT INTO movie_scenes (
                         id, project_id, story_scene_id, order_index, absolute_order,
                         title, target_duration_s, narrative_text, duration_locked, prompt_text,
                         camera_direction, action_direction, wan_prompt_text,
@@ -1097,8 +1097,8 @@ class MovieRepository:
                         uploaded_sequence_uploaded_at, trim_in_ms, trim_out_ms,
                         include_in_assembly, render_status, approved_clip_id,
                         created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                     """,
                     (
                         sequence_id,
@@ -1129,11 +1129,11 @@ class MovieRepository:
                     ),
                 )
             connection.execute(
-                "UPDATE projects SET updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, project_id),
             )
             self._normalize_sequence_orders(connection, project_id)
-            connection.execute("DELETE FROM continuity_reviews WHERE scene_id = ?", (scene_id,))
+            connection.execute("DELETE FROM movie_continuity_reviews WHERE scene_id = %s AND workspace_id = \'default\'", (scene_id,))
         return self.list_sequences(scene_id)
 
     def list_sequences(self, scene_id: str) -> list[dict]:
@@ -1141,8 +1141,8 @@ class MovieRepository:
             rows = connection.execute(
                 """
                 SELECT *
-                FROM scenes
-                WHERE story_scene_id = ?
+                FROM movie_scenes
+                WHERE story_scene_id = %s
                 ORDER BY order_index ASC, absolute_order ASC, created_at ASC
                 """,
                 (scene_id,),
@@ -1161,14 +1161,14 @@ class MovieRepository:
     def get_story_scene_record(self, scene_id: str):
         with self.database.connect() as connection:
             return connection.execute(
-                "SELECT * FROM story_scenes WHERE id = ?",
+                "SELECT * FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
 
     def get_sequence(self, sequence_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM scenes WHERE id = ?",
+                "SELECT * FROM movie_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (sequence_id,),
             ).fetchone()
         if row is None:
@@ -1192,7 +1192,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT project_id, story_scene_id, target_duration_s FROM scenes WHERE id = ?",
+                "SELECT project_id, story_scene_id, target_duration_s FROM movie_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (sequence_id,),
             ).fetchone()
             if row is None or row["story_scene_id"] is None:
@@ -1213,10 +1213,10 @@ class MovieRepository:
                 )
             else:
                 connection.execute(
-                    "UPDATE projects SET updated_at = ? WHERE id = ?",
+                    "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                     (now, project_id),
                 )
-            connection.execute("DELETE FROM continuity_reviews WHERE scene_id = ?", (row["story_scene_id"],))
+            connection.execute("DELETE FROM movie_continuity_reviews WHERE scene_id = %s AND workspace_id = \'default\'", (row["story_scene_id"],))
         return self.get_sequence(sequence_id)
 
     def list_sequence_video_variants(self, sequence_id: str) -> list[dict]:
@@ -1224,8 +1224,8 @@ class MovieRepository:
             rows = connection.execute(
                 """
                 SELECT *
-                FROM sequence_video_variants
-                WHERE sequence_id = ?
+                FROM movie_sequence_video_variants
+                WHERE sequence_id = %s AND workspace_id = \'default\'
                 ORDER BY created_at DESC
                 """,
                 (sequence_id,),
@@ -1292,14 +1292,14 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             sequence_row = connection.execute(
-                "SELECT project_id, story_scene_id FROM scenes WHERE id = ?",
+                "SELECT project_id, story_scene_id FROM movie_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (sequence_id,),
             ).fetchone()
             if sequence_row is None or sequence_row["story_scene_id"] is None:
                 raise RuntimeError("Sequence not found for generated video variant.")
             connection.execute(
                 """
-                INSERT INTO sequence_video_variants (
+                INSERT INTO movie_sequence_video_variants (
                     id, project_id, scene_id, sequence_id, provider, model_name, seed, prompt_text,
                     relative_path, original_filename, mime_type, size_bytes,
                     native_duration_s, output_duration_s,
@@ -1307,8 +1307,8 @@ class MovieRepository:
                     input_frame_size_bytes, input_frame_created_at,
                     last_frame_relative_path, last_frame_original_filename, last_frame_mime_type,
                     last_frame_size_bytes, last_frame_created_at, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     variant_id,
@@ -1339,7 +1339,7 @@ class MovieRepository:
                 ),
             )
             connection.execute(
-                "UPDATE projects SET updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, sequence_row["project_id"]),
             )
         variants = self.list_sequence_video_variants(sequence_id)
@@ -1348,7 +1348,7 @@ class MovieRepository:
     def approve_sequence_video_variant(self, sequence_id: str, asset_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM sequence_video_variants WHERE id = ? AND sequence_id = ?",
+                "SELECT * FROM movie_sequence_video_variants WHERE id = %s AND workspace_id = \'default\' AND sequence_id = %s",
                 (asset_id, sequence_id),
             ).fetchone()
             if row is None:
@@ -1382,7 +1382,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             scene_row = connection.execute(
-                "SELECT project_id FROM story_scenes WHERE id = ?",
+                "SELECT project_id FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
             if scene_row is None:
@@ -1390,8 +1390,8 @@ class MovieRepository:
             valid_rows = connection.execute(
                 """
                 SELECT id
-                FROM scenes
-                WHERE story_scene_id = ?
+                FROM movie_scenes
+                WHERE story_scene_id = %s
                 """,
                 (scene_id,),
             ).fetchall()
@@ -1400,9 +1400,9 @@ class MovieRepository:
             for sequence_id in target_ids:
                 self._update_sequence_row(connection, sequence_id, updates, now)
             if target_ids:
-                connection.execute("DELETE FROM continuity_reviews WHERE scene_id = ?", (scene_id,))
+                connection.execute("DELETE FROM movie_continuity_reviews WHERE scene_id = %s AND workspace_id = \'default\'", (scene_id,))
                 connection.execute(
-                    "UPDATE projects SET updated_at = ? WHERE id = ?",
+                    "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                     (now, scene_row["project_id"]),
                 )
         return self.list_sequences(scene_id)
@@ -1410,7 +1410,7 @@ class MovieRepository:
     def get_continuity_review(self, scene_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM continuity_reviews WHERE scene_id = ?",
+                "SELECT * FROM movie_continuity_reviews WHERE scene_id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
         return None if row is None else self._continuity_review_from_row(row)
@@ -1419,18 +1419,18 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             existing = connection.execute(
-                "SELECT id, created_at FROM continuity_reviews WHERE scene_id = ?",
+                "SELECT id, created_at FROM movie_continuity_reviews WHERE scene_id = %s AND workspace_id = \'default\'",
                 (scene_id,),
             ).fetchone()
             review_id = existing["id"] if existing is not None else str(uuid.uuid4())
             created_at = existing["created_at"] if existing is not None else now
             connection.execute(
                 """
-                INSERT INTO continuity_reviews (
+                INSERT INTO movie_continuity_reviews (
                     id, project_id, scene_id, source, summary_text,
                     findings_json, sequence_suggestions_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 ON CONFLICT(scene_id) DO UPDATE SET
                     source = excluded.source,
                     summary_text = excluded.summary_text,
@@ -1451,7 +1451,7 @@ class MovieRepository:
                 ),
             )
             connection.execute(
-                "UPDATE projects SET updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, project_id),
             )
         saved = self.get_continuity_review(scene_id)
@@ -1465,15 +1465,15 @@ class MovieRepository:
             row = connection.execute(
                 """
                 SELECT project_id
-                FROM continuity_reviews
-                WHERE scene_id = ?
+                FROM movie_continuity_reviews
+                WHERE scene_id = %s AND workspace_id = \'default\'
                 """,
                 (scene_id,),
             ).fetchone()
-            connection.execute("DELETE FROM continuity_reviews WHERE scene_id = ?", (scene_id,))
+            connection.execute("DELETE FROM movie_continuity_reviews WHERE scene_id = %s AND workspace_id = \'default\'", (scene_id,))
             if row is not None:
                 connection.execute(
-                    "UPDATE projects SET updated_at = ? WHERE id = ?",
+                    "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                     (now, row["project_id"]),
                 )
 
@@ -1516,15 +1516,15 @@ class MovieRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO projects (
+                INSERT INTO movie_projects (
                     id, name, scenario_text, genre, tone, target_duration_s,
                     output_width, output_height, output_fps, aspect_ratio,
                     workflow_version, style_anchor_text, model_settings_override_json, opening_image_prompt_text,
                     opening_image_relative_path, opening_image_original_filename,
                     opening_image_mime_type, opening_image_size_bytes,
                     opening_image_uploaded_at, beat_board_status, archived_at, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     target_project_id,
@@ -1556,8 +1556,8 @@ class MovieRepository:
             legacy_rows = connection.execute(
                 """
                 SELECT *
-                FROM scenes
-                WHERE project_id = ? AND story_scene_id IS NULL
+                FROM movie_scenes
+                WHERE project_id = %s AND workspace_id = \'default\' AND story_scene_id IS NULL
                 ORDER BY order_index ASC, created_at ASC
                 """,
                 (source_project_id,),
@@ -1569,14 +1569,14 @@ class MovieRepository:
                 story_scene_id = str(uuid.uuid4())
                 connection.execute(
                     """
-                    INSERT INTO story_scenes (
+                    INSERT INTO movie_story_scenes (
                         id, project_id, order_index, title, target_duration_s,
                         narrative_text, duration_locked, first_image_prompt_text,
                         first_image_relative_path, first_image_original_filename,
                         first_image_mime_type, first_image_size_bytes,
                         first_image_uploaded_at, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                     """,
                     (
                         story_scene_id,
@@ -1614,7 +1614,7 @@ class MovieRepository:
                             shutil.copy2(source_path, target_path)
                     connection.execute(
                         """
-                        INSERT INTO scenes (
+                        INSERT INTO movie_scenes (
                             id, project_id, story_scene_id, order_index, absolute_order,
                             title, target_duration_s, narrative_text, duration_locked, prompt_text,
                             camera_direction, action_direction, wan_prompt_text,
@@ -1623,8 +1623,8 @@ class MovieRepository:
                             uploaded_sequence_uploaded_at, trim_in_ms, trim_out_ms,
                             include_in_assembly, render_status, approved_clip_id,
                             created_at, updated_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                         """,
                         (
                             new_sequence_id,
@@ -1662,12 +1662,12 @@ class MovieRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO jobs (
+                INSERT INTO movie_jobs (
                     id, project_id, scene_id, job_type, status, progress,
                     payload_json, result_json, error_text, cancel_requested,
                     created_at, updated_at, started_at, completed_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     job_id,
@@ -1691,7 +1691,7 @@ class MovieRepository:
     def get_job(self, job_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM jobs WHERE id = ?",
+                "SELECT * FROM movie_jobs WHERE id = %s AND workspace_id = \'default\'",
                 (job_id,),
             ).fetchone()
         return None if row is None else self._job_from_row(row)
@@ -1701,9 +1701,9 @@ class MovieRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                UPDATE jobs
-                SET status = ?, started_at = COALESCE(started_at, ?), updated_at = ?
-                WHERE id = ?
+                UPDATE movie_jobs
+                SET status = %s, started_at = COALESCE(started_at, %s), updated_at = %s
+                WHERE id = %s AND workspace_id = \'default\'
                 """,
                 (JobStatus.running.value, now, now, job_id),
             )
@@ -1722,31 +1722,31 @@ class MovieRepository:
         assignments = []
         values: list[object] = []
         if status is not None:
-            assignments.append("status = ?")
+            assignments.append("status = %s")
             values.append(status.value)
         if progress is not None:
-            assignments.append("progress = ?")
+            assignments.append("progress = %s")
             values.append(progress)
         if result is not None:
-            assignments.append("result_json = ?")
+            assignments.append("result_json = %s")
             values.append(json.dumps(result))
         if error_text is not None or status == JobStatus.failed:
-            assignments.append("error_text = ?")
+            assignments.append("error_text = %s")
             values.append(error_text)
         if cancel_requested is not None:
-            assignments.append("cancel_requested = ?")
+            assignments.append("cancel_requested = %s")
             values.append(1 if cancel_requested else 0)
         now = utc_now_iso()
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         if status in {JobStatus.succeeded, JobStatus.failed, JobStatus.canceled}:
-            assignments.append("completed_at = ?")
+            assignments.append("completed_at = %s")
             values.append(now)
         values.append(job_id)
 
         with self.database.connect() as connection:
             connection.execute(
-                f"UPDATE jobs SET {', '.join(assignments)} WHERE id = ?",
+                f"UPDATE movie_jobs SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'",
                 values,
             )
         return self.get_job(job_id)
@@ -1757,20 +1757,20 @@ class MovieRepository:
     def requeue_pending_jobs(self) -> list[str]:
         with self.database.connect() as connection:
             running_jobs = connection.execute(
-                "SELECT id FROM jobs WHERE status = ?",
+                "SELECT id FROM movie_jobs WHERE status = %s",
                 (JobStatus.running.value,),
             ).fetchall()
             queued_jobs = connection.execute(
-                "SELECT id FROM jobs WHERE status = ? ORDER BY created_at ASC",
+                "SELECT id FROM movie_jobs WHERE status = %s ORDER BY created_at ASC",
                 (JobStatus.queued.value,),
             ).fetchall()
             now = utc_now_iso()
             if running_jobs:
                 connection.execute(
                     """
-                    UPDATE jobs
-                    SET status = ?, error_text = ?, completed_at = ?, updated_at = ?
-                    WHERE status = ?
+                    UPDATE movie_jobs
+                    SET status = %s, error_text = %s, completed_at = %s, updated_at = %s
+                    WHERE status = %s
                     """,
                     (
                         JobStatus.failed.value,
@@ -1788,13 +1788,13 @@ class MovieRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO export_assets (id, project_id, job_id, relative_path, duration_s, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO movie_export_assets (id, project_id, job_id, relative_path, duration_s, created_at, workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (export_id, project_id, job_id, relative_path, duration_s, now),
             )
             connection.execute(
-                "UPDATE projects SET updated_at = ? WHERE id = ?",
+                "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, project_id),
             )
         detail = self.get_project_detail(project_id)
@@ -1824,13 +1824,13 @@ class MovieRepository:
         assignments = []
         values: list[object] = []
         for key, value in updates.items():
-            assignments.append(f"{key} = ?")
+            assignments.append(f"{key} = %s")
             values.append(value)
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         values.append(project_id)
         connection.execute(
-            f"UPDATE projects SET {', '.join(assignments)} WHERE id = ?",
+            f"UPDATE movie_projects SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'",
             values,
         )
 
@@ -1848,18 +1848,18 @@ class MovieRepository:
         for key, value in updates.items():
             if key == "duration_locked":
                 value = 1 if value else 0
-            assignments.append(f"{key} = ?")
+            assignments.append(f"{key} = %s")
             values.append(value)
         if order is not None:
-            assignments.append("order_index = ?")
+            assignments.append("order_index = %s")
             values.append(order)
         if not assignments:
             return
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         values.append(scene_id)
         connection.execute(
-            f"UPDATE story_scenes SET {', '.join(assignments)} WHERE id = ?",
+            f"UPDATE movie_story_scenes SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'",
             values,
         )
 
@@ -1877,24 +1877,24 @@ class MovieRepository:
         for key, value in updates.items():
             if key in {"include_in_assembly", "duration_locked"}:
                 value = 1 if value else 0
-            assignments.append(f"{key} = ?")
+            assignments.append(f"{key} = %s")
             values.append(value)
         if order is not None:
-            assignments.append("order_index = ?")
+            assignments.append("order_index = %s")
             values.append(order)
         if not assignments:
             return
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         values.append(sequence_id)
         connection.execute(
-            f"UPDATE scenes SET {', '.join(assignments)} WHERE id = ?",
+            f"UPDATE movie_scenes SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'",
             values,
         )
 
     def _rebalance_project_scenes_to_total(self, connection, project_id: str, total_duration_s: int, now: str) -> None:
         scene_rows = connection.execute(
-            "SELECT * FROM story_scenes WHERE project_id = ? ORDER BY order_index ASC, created_at ASC",
+            "SELECT * FROM movie_story_scenes WHERE project_id = %s AND workspace_id = \'default\' ORDER BY order_index ASC, created_at ASC",
             (project_id,),
         ).fetchall()
         if not scene_rows:
@@ -1918,17 +1918,17 @@ class MovieRepository:
         now: str,
     ) -> None:
         scene_row = connection.execute(
-            "SELECT project_id FROM story_scenes WHERE id = ?",
+            "SELECT project_id FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
             (scene_id,),
         ).fetchone()
         if scene_row is None:
             return
         project_row = connection.execute(
-            "SELECT target_duration_s FROM projects WHERE id = ?",
+            "SELECT target_duration_s FROM movie_projects WHERE id = %s AND workspace_id = \'default\'",
             (scene_row["project_id"],),
         ).fetchone()
         scene_rows = connection.execute(
-            "SELECT * FROM story_scenes WHERE project_id = ? ORDER BY order_index ASC, created_at ASC",
+            "SELECT * FROM movie_story_scenes WHERE project_id = %s AND workspace_id = \'default\' ORDER BY order_index ASC, created_at ASC",
             (scene_row["project_id"],),
         ).fetchall()
         if project_row is None or not scene_rows:
@@ -1945,7 +1945,7 @@ class MovieRepository:
         for changed_scene_id in changed_scene_ids:
             self._rebalance_scene_sequence_durations(connection, changed_scene_id, now)
         connection.execute(
-            "UPDATE projects SET updated_at = ? WHERE id = ?",
+            "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
             (now, scene_row["project_id"]),
         )
 
@@ -1959,7 +1959,7 @@ class MovieRepository:
         fixed_duration: int | None = None,
     ) -> None:
         scene_row = connection.execute(
-            "SELECT project_id, target_duration_s FROM story_scenes WHERE id = ?",
+            "SELECT project_id, target_duration_s FROM movie_story_scenes WHERE id = %s AND workspace_id = \'default\'",
             (scene_id,),
         ).fetchone()
         if scene_row is None:
@@ -1967,8 +1967,8 @@ class MovieRepository:
         sequence_rows = connection.execute(
             """
             SELECT *
-            FROM scenes
-            WHERE story_scene_id = ?
+            FROM movie_scenes
+            WHERE story_scene_id = %s
             ORDER BY order_index ASC, absolute_order ASC, created_at ASC
             """,
             (scene_id,),
@@ -1988,7 +1988,7 @@ class MovieRepository:
         )
         self._apply_sequence_duration_map(connection, sequence_rows, duration_map, now)
         connection.execute(
-            "UPDATE projects SET updated_at = ? WHERE id = ?",
+            "UPDATE movie_projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
             (now, scene_row["project_id"]),
         )
 
@@ -2000,7 +2000,7 @@ class MovieRepository:
                 continue
             changed_scene_ids.append(row["id"])
             connection.execute(
-                "UPDATE story_scenes SET target_duration_s = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_story_scenes SET target_duration_s = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (next_duration, now, row["id"]),
             )
         return changed_scene_ids
@@ -2013,7 +2013,7 @@ class MovieRepository:
                 continue
             changed_sequence_ids.append(row["id"])
             connection.execute(
-                "UPDATE scenes SET target_duration_s = ?, updated_at = ? WHERE id = ?",
+                "UPDATE movie_scenes SET target_duration_s = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (next_duration, now, row["id"]),
             )
         return changed_sequence_ids
@@ -2137,18 +2137,18 @@ class MovieRepository:
 
     def _normalize_story_scene_order(self, connection, project_id: str) -> None:
         rows = connection.execute(
-            "SELECT id FROM story_scenes WHERE project_id = ? ORDER BY order_index ASC, created_at ASC",
+            "SELECT id FROM movie_story_scenes WHERE project_id = %s AND workspace_id = \'default\' ORDER BY order_index ASC, created_at ASC",
             (project_id,),
         ).fetchall()
         for index, row in enumerate(rows, start=1):
             connection.execute(
-                "UPDATE story_scenes SET order_index = ? WHERE id = ?",
+                "UPDATE movie_story_scenes SET order_index = %s WHERE id = %s AND workspace_id = \'default\'",
                 (index, row["id"]),
             )
 
     def _normalize_sequence_orders(self, connection, project_id: str) -> None:
         story_scene_rows = connection.execute(
-            "SELECT id FROM story_scenes WHERE project_id = ? ORDER BY order_index ASC, created_at ASC",
+            "SELECT id FROM movie_story_scenes WHERE project_id = %s AND workspace_id = \'default\' ORDER BY order_index ASC, created_at ASC",
             (project_id,),
         ).fetchall()
         absolute_order = 0
@@ -2156,8 +2156,8 @@ class MovieRepository:
             sequence_rows = connection.execute(
                 """
                 SELECT id
-                FROM scenes
-                WHERE project_id = ? AND story_scene_id = ?
+                FROM movie_scenes
+                WHERE project_id = %s AND workspace_id = \'default\' AND story_scene_id = %s
                 ORDER BY order_index ASC, absolute_order ASC, created_at ASC
                 """,
                 (project_id, story_scene_row["id"]),
@@ -2165,7 +2165,7 @@ class MovieRepository:
             for index, sequence_row in enumerate(sequence_rows, start=1):
                 absolute_order += 1
                 connection.execute(
-                    "UPDATE scenes SET order_index = ?, absolute_order = ? WHERE id = ?",
+                    "UPDATE movie_scenes SET order_index = %s, absolute_order = %s WHERE id = %s AND workspace_id = \'default\'",
                     (index, absolute_order, sequence_row["id"]),
                 )
 
@@ -2174,15 +2174,15 @@ class MovieRepository:
             beat_rows = connection.execute(
                 """
                 SELECT id
-                FROM story_beats
-                WHERE project_id = ? AND act_index = ?
+                FROM movie_story_beats
+                WHERE project_id = %s AND workspace_id = \'default\' AND act_index = %s
                 ORDER BY order_index ASC, created_at ASC
                 """,
                 (project_id, act_index),
             ).fetchall()
             for index, beat_row in enumerate(beat_rows, start=1):
                 connection.execute(
-                    "UPDATE story_beats SET order_index = ? WHERE id = ?",
+                    "UPDATE movie_story_beats SET order_index = %s WHERE id = %s AND workspace_id = \'default\'",
                     (index, beat_row["id"]),
                 )
 
@@ -2190,15 +2190,15 @@ class MovieRepository:
         rows = connection.execute(
             """
             SELECT id
-            FROM project_characters
-            WHERE project_id = ?
+            FROM movie_project_characters
+            WHERE project_id = %s AND workspace_id = \'default\'
             ORDER BY order_index ASC, created_at ASC
             """,
             (project_id,),
         ).fetchall()
         for index, row in enumerate(rows, start=1):
             connection.execute(
-                "UPDATE project_characters SET order_index = ? WHERE id = ?",
+                "UPDATE movie_project_characters SET order_index = %s WHERE id = %s AND workspace_id = \'default\'",
                 (index, row["id"]),
             )
 

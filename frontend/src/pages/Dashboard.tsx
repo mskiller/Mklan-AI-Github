@@ -19,6 +19,7 @@ import {
   Sparkles,
   Tags,
 } from 'lucide-react';
+import { useTranslation } from '../i18n';
 
 interface StudioModule {
   id: string;
@@ -131,6 +132,7 @@ function serviceLabel(id: string) {
 }
 
 export function Dashboard() {
+  const { t } = useTranslation();
   const [manifest, setManifest] = useState<StudioManifest | null>(null);
   const [preflight, setPreflight] = useState<StudioPreflight | null>(null);
   const [jobs, setJobs] = useState<JobsOverview | null>(null);
@@ -214,7 +216,7 @@ export function Dashboard() {
 
       <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))', gap: '1rem', alignItems: 'start' }}>
         <div style={{ display: 'grid', gap: '0.8rem', minWidth: 0 }}>
-          <h2 style={{ fontSize: '1.05rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Database size={18} color="var(--accent-hover)" /> Workspace Modules</h2>
+          <h2 style={{ fontSize: '1.05rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Database size={18} color="var(--accent-hover)" /> {t('dashboard.workspace_modules')}</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(210px, 100%), 1fr))', gap: '0.75rem' }}>
             {modules.map((module) => {
               const Icon = moduleIcons[module.id] || Gauge;
@@ -225,7 +227,7 @@ export function Dashboard() {
                     <span style={{ color: statusColor(module.status), fontSize: '0.78rem', fontWeight: 700 }}>{module.status}</span>
                   </div>
                   <div>
-                    <strong style={{ display: 'block', fontSize: '1rem' }}>{module.label}</strong>
+                    <strong style={{ display: 'block', fontSize: '1rem' }}>{t(`nav.${module.id}`, undefined) !== `nav.${module.id}` ? t(`nav.${module.id}`) : module.label}</strong>
                     <span style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>{module.category}</span>
                   </div>
                 </NavLink>

@@ -7,11 +7,22 @@
 
 ---
 
-## Public Repository Note
+## Screenshots
 
-This copy intentionally omits screenshots, sample media, local databases, cached
-models, and generated previews. Add your own media sources locally through Docker
-bind mounts or an uncommitted Compose override.
+### Browse Indexed — Gallery view
+Browse and curate your entire indexed library with filters, sort options, bulk-select, and collection shortcuts. Hover or long-press any tile for quick actions.
+
+![Browse Indexed gallery view](docs/screenshots/browse-indexed.png)
+
+### Asset Explorer — Detail & Inspector panel
+Click any image to open the full-screen explorer with a filmstrip, zoom controls, and an inspector panel showing the prompt, dimensions, file size, and modification date. Stage assets directly for side-by-side comparison.
+
+![Asset explorer with inspector panel](docs/screenshots/explorer-detail.png)
+
+### Scan Jobs — Real-time progress tracking
+Monitor all scan jobs in near real time: running, cancelled, and completed — with per-job counters for scanned, new, updated, deleted, and error counts.
+
+![Scan jobs dashboard](docs/screenshots/scan-jobs.png)
 
 ---
 
@@ -71,8 +82,8 @@ _Previous highlights (v1.9): Local AI enrichment (WD taggers, BLIP, OCR), Timeli
 
 ```bash
 # 1. Clone
-git clone https://github.com/your-org/mklan-studio.git
-cd mklan-studio/media-indexer
+git clone https://github.com/mskiller/mklanlocal.git
+cd mklanlocal
 
 # 2. Create your environment file
 cp .env.example .env

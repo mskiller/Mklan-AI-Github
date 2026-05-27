@@ -14,6 +14,7 @@ torchaudio>=2.3.0,<2.4.0 --index-url https://download.pytorch.org/whl/cu121
 diffusers>=0.30.0,<0.35.0
 transformers>=4.44.0,<4.53.0
 open_clip_torch>=2.24.0,<3.0.0
+sentence-transformers>=3.0.0,<4.0.0
 
 # Trainer-side dependencies used by kohya-ss/sd-scripts presets.
 bitsandbytes>=0.43.0,<0.46.0

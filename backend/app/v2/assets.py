@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sqlite3
 from typing import Any
 import uuid
@@ -11,6 +11,9 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 import requests
+
+from app.v2.core_db import connect_core_db, core_db_enabled, initialize_core_db
+from app.v2.workspaces import DEFAULT_WORKSPACE_ID, active_workspace_id
 
 
 def utc_now_iso() -> str:
@@ -24,6 +27,8 @@ def _json_dumps(value: Any) -> str:
 def _json_loads(value: str | None, fallback: Any) -> Any:
     if not value:
         return fallback
+    if isinstance(value, (dict, list)):
+        return value
     try:
         return json.loads(value)
     except json.JSONDecodeError:
@@ -38,6 +43,7 @@ class GeneratedAssetIngestRequest(BaseModel):
     kind: str = Field(default="image", max_length=40)
     metadata: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    workspace_id: str | None = Field(default=None, max_length=120)
 
 
 class AssetRead(BaseModel):
@@ -50,6 +56,7 @@ class AssetRead(BaseModel):
     metadata: dict[str, Any]
     provenance: dict[str, Any]
     media_indexer_status: str
+    workspace_id: str = DEFAULT_WORKSPACE_ID
     created_at: str
     updated_at: str
 
@@ -81,8 +88,15 @@ class AssetRegistry:
         self.generated_root = data_root / "generated"
         self.db_path = data_root / "platform_assets.db"
 
+    @property
+    def storage_backend(self) -> str:
+        return "postgres" if core_db_enabled() else "sqlite"
+
     def initialize(self) -> None:
         self.generated_root.mkdir(parents=True, exist_ok=True)
+        if self.storage_backend == "postgres":
+            initialize_core_db()
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(
@@ -98,12 +112,18 @@ class AssetRegistry:
                     provenance_json TEXT NOT NULL DEFAULT '{}',
                     media_indexer_status TEXT NOT NULL DEFAULT 'registered',
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL DEFAULT 'default'
                 );
                 CREATE INDEX IF NOT EXISTS idx_platform_assets_source ON assets(source_module, source_id);
                 CREATE INDEX IF NOT EXISTS idx_platform_assets_kind_created ON assets(kind, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_platform_assets_workspace_created ON assets(workspace_id, created_at DESC);
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(assets)").fetchall()}
+            if "workspace_id" not in columns:
+                conn.execute("ALTER TABLE assets ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default'")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_assets_workspace_created ON assets(workspace_id, created_at DESC)")
             conn.commit()
 
     def ingest_generated(self, payload: GeneratedAssetIngestRequest) -> dict[str, Any]:
@@ -120,76 +140,54 @@ class AssetRegistry:
             "ingested_from": "generated",
             **payload.provenance,
         }
+        workspace_id = payload.workspace_id or active_workspace_id(self.data_root)
         asset_id = uuid.uuid4().hex
         now = utc_now_iso()
-        with self._connect() as conn:
-            existing = conn.execute("SELECT * FROM assets WHERE path = ?", (str(path),)).fetchone()
-            if existing is not None:
-                conn.execute(
-                    """
-                    UPDATE assets
-                       SET source_module = ?,
-                           source_id = ?,
-                           kind = ?,
-                           metadata_json = ?,
-                           provenance_json = ?,
-                           media_indexer_status = ?,
-                           updated_at = ?
-                     WHERE id = ?
-                    """,
-                    (
-                        payload.source_module,
-                        payload.source_id,
-                        payload.kind,
-                        _json_dumps(metadata),
-                        _json_dumps(provenance),
-                        "registered",
-                        now,
-                        existing["id"],
-                    ),
-                )
-                conn.commit()
-                row = conn.execute("SELECT * FROM assets WHERE id = ?", (existing["id"],)).fetchone()
-                asset = self._asset_from_row(row)
-                self._maybe_sync_generated_with_media_indexer(asset, path.name)
-                return asset
-            conn.execute(
-                """
-                INSERT INTO assets (
-                    id, path, url, kind, source_module, source_id, metadata_json,
-                    provenance_json, media_indexer_status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registered', ?, ?)
-                """,
-                (
-                    asset_id,
-                    str(path),
-                    url,
-                    payload.kind,
-                    payload.source_module,
-                    payload.source_id,
-                    _json_dumps(metadata),
-                    _json_dumps(provenance),
-                    now,
-                    now,
-                ),
+        existing = self._fetch_asset_by_path(str(path))
+        if existing is not None:
+            self._update_asset(
+                existing["id"],
+                source_module=payload.source_module,
+                source_id=payload.source_id,
+                kind=payload.kind,
+                metadata=metadata,
+                provenance=provenance,
+                media_indexer_status="registered",
+                updated_at=now,
+                workspace_id=workspace_id,
             )
-            conn.commit()
-            row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
-        asset = self._asset_from_row(row)
-        self._maybe_sync_generated_with_media_indexer(asset, path.name)
+            asset = self.get_asset(existing["id"])
+            self._maybe_sync_generated_with_media_indexer(asset, path.relative_to(self.generated_root).as_posix())
+            return asset
+        self._insert_asset(
+            {
+                "id": asset_id,
+                "path": str(path),
+                "url": url,
+                "kind": payload.kind,
+                "source_module": payload.source_module,
+                "source_id": payload.source_id,
+                "metadata": metadata,
+                "provenance": provenance,
+                "media_indexer_status": "registered",
+                "workspace_id": workspace_id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        asset = self.get_asset(asset_id)
+        self._maybe_sync_generated_with_media_indexer(asset, path.relative_to(self.generated_root).as_posix())
         return asset
 
     def get_asset(self, asset_id: str) -> dict[str, Any]:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+        row = self._fetch_asset_by_id(asset_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Asset provenance was not found.")
         return self._asset_from_row(row)
 
     def search_local(self, query: str, *, limit: int = 40) -> list[dict[str, Any]]:
         query_text = query.strip().lower()
-        with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM assets ORDER BY created_at DESC LIMIT ?", (max(limit, 1),)).fetchall()
+        rows = self._fetch_recent_assets(limit=max(limit, 1))
         assets = [self._asset_from_row(row) for row in rows]
         if not query_text:
             return assets[:limit]
@@ -209,11 +207,48 @@ class AssetRegistry:
             return matched[:limit]
         return self._search_generated_files(query_text, limit=limit)
 
+    def list_assets(self, *, workspace_id: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 5000))
+        scoped_workspace_id = active_workspace_id(self.data_root) if workspace_id is None else workspace_id
+        if self.storage_backend == "postgres":
+            clauses: list[str] = []
+            values: list[Any] = []
+            if scoped_workspace_id and scoped_workspace_id != "__all__":
+                clauses.append("workspace_id = %s")
+                values.append(scoped_workspace_id)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            with connect_core_db() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(f"SELECT * FROM platform_assets {where} ORDER BY created_at DESC LIMIT %s", (*values, limit))
+                    rows = cursor.fetchall()
+            return [self._asset_from_row(row) for row in rows]
+        with self._connect() as conn:
+            clauses = []
+            values = []
+            if scoped_workspace_id and scoped_workspace_id != "__all__":
+                clauses.append("workspace_id = ?")
+                values.append(scoped_workspace_id)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(f"SELECT * FROM assets {where} ORDER BY created_at DESC LIMIT ?", (*values, limit)).fetchall()
+        return [self._asset_from_row(row) for row in rows]
+
     def _search_generated_files(self, query_text: str, *, limit: int) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
-        for image_path in sorted(self.generated_root.glob("*"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
-            if image_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        suffix_kinds = {
+            ".png": "image",
+            ".jpg": "image",
+            ".jpeg": "image",
+            ".webp": "image",
+            ".gif": "image",
+            ".mp4": "video",
+            ".mov": "video",
+            ".webm": "video",
+            ".mkv": "video",
+        }
+        for image_path in sorted(self.generated_root.rglob("*"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
+            if not image_path.is_file() or image_path.suffix.lower() not in suffix_kinds:
                 continue
+            relative_path = image_path.relative_to(self.generated_root).as_posix()
             metadata = {}
             metadata_path = image_path.with_suffix(".json")
             if metadata_path.exists():
@@ -221,7 +256,7 @@ class AssetRegistry:
                     metadata = _json_loads(metadata_path.read_text(encoding="utf-8"), {})
                 except OSError:
                     metadata = {}
-            haystack = f"{image_path.name} {json.dumps(metadata, ensure_ascii=False)}".lower()
+            haystack = f"{relative_path} {json.dumps(metadata, ensure_ascii=False)}".lower()
             if query_text and query_text not in haystack:
                 continue
             stat = image_path.stat()
@@ -229,13 +264,14 @@ class AssetRegistry:
                 {
                     "id": f"generated:{image_path.stem}",
                     "path": str(image_path),
-                    "url": f"/generated/{image_path.name}",
-                    "kind": "image",
+                    "url": f"/generated/{relative_path}",
+                    "kind": suffix_kinds[image_path.suffix.lower()],
                     "source_module": "generated",
                     "source_id": image_path.stem,
                     "metadata": metadata,
                     "provenance": {"canonical_target": "media-indexer", "ingested_from": "generated-scan"},
                     "media_indexer_status": "not_registered",
+                    "workspace_id": active_workspace_id(self.data_root),
                     "created_at": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
                     "updated_at": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
                 }
@@ -296,12 +332,7 @@ class AssetRegistry:
             scan_mode = "metadata"
         result = self.sync_generated_source(scan_mode=scan_mode, path_filter=filename if scan_mode != "none" else None)
         status = result.get("status") if result.get("ok") else f"sync_failed:{result.get('status', 'unavailable')}"
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE assets SET media_indexer_status = ?, updated_at = ? WHERE id = ?",
-                (str(status), utc_now_iso(), asset["id"]),
-            )
-            conn.commit()
+        self._update_media_indexer_status(asset["id"], str(status))
         asset["media_indexer_status"] = str(status)
 
     def _ensure_media_indexer_generated_source(self, base_url: str) -> dict[str, Any]:
@@ -347,7 +378,7 @@ class AssetRegistry:
         return float(os.getenv("MEDIA_INDEXER_TIMEOUT_S", "3"))
 
     def _resolve_generated_path(self, file_value: str | None, url_value: str | None) -> tuple[Path, str]:
-        raw = (file_value or url_value or "").strip()
+        raw = (file_value or url_value or "").strip().replace("\\", "/")
         if not raw:
             raise HTTPException(status_code=400, detail="Provide a generated file or URL.")
         if raw.startswith("/generated/"):
@@ -356,15 +387,16 @@ class AssetRegistry:
             filename = raw.split("generated/", 1)[1]
         else:
             filename = raw
-        if "/" in filename or "\\" in filename or filename in {"", ".", ".."}:
+        relative = PurePosixPath(filename)
+        if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
             raise HTTPException(status_code=400, detail="Generated asset filename is invalid.")
-        path = (self.generated_root / filename).resolve(strict=False)
+        path = (self.generated_root / Path(*relative.parts)).resolve(strict=False)
         root = self.generated_root.resolve(strict=False)
-        if root not in path.parents:
+        if root != path and root not in path.parents:
             raise HTTPException(status_code=400, detail="Generated asset path is outside the generated directory.")
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Generated asset file was not found.")
-        return path, f"/generated/{path.name}"
+        return path, f"/generated/{path.relative_to(root).as_posix()}"
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -372,7 +404,7 @@ class AssetRegistry:
         return conn
 
     @staticmethod
-    def _asset_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    def _asset_from_row(row: Any) -> dict[str, Any]:
         return {
             "id": row["id"],
             "path": row["path"],
@@ -383,9 +415,185 @@ class AssetRegistry:
             "metadata": _json_loads(row["metadata_json"], {}),
             "provenance": _json_loads(row["provenance_json"], {}),
             "media_indexer_status": row["media_indexer_status"],
+            "workspace_id": row["workspace_id"] if "workspace_id" in row.keys() else DEFAULT_WORKSPACE_ID,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def _fetch_asset_by_path(self, path: str) -> Any | None:
+        if self.storage_backend == "postgres":
+            with connect_core_db() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT * FROM platform_assets WHERE path = %s", (path,))
+                    return cursor.fetchone()
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM assets WHERE path = ?", (path,)).fetchone()
+
+    def _fetch_asset_by_id(self, asset_id: str) -> Any | None:
+        if self.storage_backend == "postgres":
+            with connect_core_db() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT * FROM platform_assets WHERE id = %s", (asset_id,))
+                    return cursor.fetchone()
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+
+    def _fetch_recent_assets(self, *, limit: int) -> list[Any]:
+        if self.storage_backend == "postgres":
+            with connect_core_db() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM platform_assets WHERE workspace_id = %s ORDER BY created_at DESC LIMIT %s",
+                        (active_workspace_id(self.data_root), limit),
+                    )
+                    return list(cursor.fetchall())
+        with self._connect() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM assets WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (active_workspace_id(self.data_root), limit),
+                ).fetchall()
+            )
+
+    def _insert_asset(self, asset: dict[str, Any]) -> None:
+        if self.storage_backend == "postgres":
+            with connect_core_db() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO platform_assets (
+                            id, path, url, kind, source_module, source_id,
+                            metadata_json, provenance_json, media_indexer_status,
+                            created_at, updated_at, workspace_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s)
+                        """,
+                        (
+                            asset["id"],
+                            asset["path"],
+                            asset["url"],
+                            asset["kind"],
+                            asset["source_module"],
+                            asset["source_id"],
+                            _json_dumps(asset["metadata"]),
+                            _json_dumps(asset["provenance"]),
+                            asset["media_indexer_status"],
+                            asset["created_at"],
+                            asset["updated_at"],
+                            asset.get("workspace_id") or DEFAULT_WORKSPACE_ID,
+                        ),
+                    )
+                conn.commit()
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO assets (
+                    id, path, url, kind, source_module, source_id, metadata_json,
+                    provenance_json, media_indexer_status, created_at, updated_at, workspace_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    asset["id"],
+                    asset["path"],
+                    asset["url"],
+                    asset["kind"],
+                    asset["source_module"],
+                    asset["source_id"],
+                    _json_dumps(asset["metadata"]),
+                    _json_dumps(asset["provenance"]),
+                    asset["media_indexer_status"],
+                    asset["created_at"],
+                    asset["updated_at"],
+                    asset.get("workspace_id") or DEFAULT_WORKSPACE_ID,
+                ),
+            )
+            conn.commit()
+
+    def _update_asset(
+        self,
+        asset_id: str,
+        *,
+        source_module: str,
+        source_id: str | None,
+        kind: str,
+        metadata: dict[str, Any],
+        provenance: dict[str, Any],
+        media_indexer_status: str,
+        updated_at: str,
+        workspace_id: str,
+    ) -> None:
+        if self.storage_backend == "postgres":
+            with connect_core_db() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE platform_assets
+                           SET source_module = %s,
+                               source_id = %s,
+                               kind = %s,
+                               metadata_json = %s::jsonb,
+                               provenance_json = %s::jsonb,
+                               media_indexer_status = %s,
+                               updated_at = %s,
+                               workspace_id = %s
+                         WHERE id = %s
+                        """,
+                        (
+                            source_module,
+                            source_id,
+                            kind,
+                            _json_dumps(metadata),
+                            _json_dumps(provenance),
+                            media_indexer_status,
+                            updated_at,
+                            workspace_id,
+                            asset_id,
+                        ),
+                    )
+                conn.commit()
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE assets
+                   SET source_module = ?,
+                       source_id = ?,
+                       kind = ?,
+                       metadata_json = ?,
+                       provenance_json = ?,
+                       media_indexer_status = ?,
+                       updated_at = ?,
+                       workspace_id = ?
+                 WHERE id = ?
+                """,
+                (
+                    source_module,
+                    source_id,
+                    kind,
+                    _json_dumps(metadata),
+                    _json_dumps(provenance),
+                    media_indexer_status,
+                    updated_at,
+                    workspace_id,
+                    asset_id,
+                ),
+            )
+            conn.commit()
+
+    def _update_media_indexer_status(self, asset_id: str, status: str) -> None:
+        now = utc_now_iso()
+        if self.storage_backend == "postgres":
+            with connect_core_db() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE platform_assets SET media_indexer_status = %s, updated_at = %s WHERE id = %s",
+                        (status, now, asset_id),
+                    )
+                conn.commit()
+            return
+        with self._connect() as conn:
+            conn.execute("UPDATE assets SET media_indexer_status = ?, updated_at = ? WHERE id = ?", (status, now, asset_id))
+            conn.commit()
 
 
 router = APIRouter(prefix="/assets", tags=["v2-assets"])

@@ -35,7 +35,7 @@ export function ComfyNodes() {
         VAE: { type: "VAE" }
       },
       properties: {
-        ckpt_name: "example-checkpoint.safetensors"
+        ckpt_name: "Mklan-Noob4-DMD2_00001_.safetensors"
       }
     },
     {

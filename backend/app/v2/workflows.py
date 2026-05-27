@@ -5,6 +5,7 @@ import base64
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 from typing import Any
 import uuid
 
@@ -27,6 +28,7 @@ WORKFLOW_PRESETS: list[dict[str, Any]] = [
         "task": "wildcards",
         "description": "General prompt sandbox using the built-in ComfyUI txt2img graph.",
         "placeholders": ["%prompt%", "%negative_prompt%", "%model%", "%width%", "%height%", "%steps%", "%scale%", "%sampler%", "%scheduler%", "%seed%"],
+        "fields": ["prompt", "negative_prompt", "model", "width", "height", "steps", "cfg_scale", "sampler_name", "scheduler", "seed"],
         "workflow_json": DEFAULT_COMFYUI_WORKFLOW,
     },
     {
@@ -35,6 +37,7 @@ WORKFLOW_PRESETS: list[dict[str, Any]] = [
         "task": "movie",
         "description": "Scene/sequence first-frame generation with deterministic seed metadata.",
         "placeholders": ["%prompt%", "%negative_prompt%", "%model%", "%width%", "%height%", "%steps%", "%scale%", "%seed%"],
+        "fields": ["prompt", "negative_prompt", "model", "width", "height", "steps", "cfg_scale", "seed"],
         "workflow_json": DEFAULT_COMFYUI_WORKFLOW,
     },
     {
@@ -43,6 +46,16 @@ WORKFLOW_PRESETS: list[dict[str, Any]] = [
         "task": "cards",
         "description": "Portrait/cowboy/fullbody card image generation routed through ComfyUI.",
         "placeholders": ["%prompt%", "%negative_prompt%", "%model%", "%width%", "%height%", "%steps%", "%scale%", "%seed%"],
+        "fields": ["prompt", "negative_prompt", "model", "width", "height", "steps", "cfg_scale", "seed"],
+        "workflow_json": DEFAULT_COMFYUI_WORKFLOW,
+    },
+    {
+        "id": "training_sample_preview",
+        "label": "Training Sample Preview",
+        "task": "training",
+        "description": "Quick LoRA sample preview workflow for checking trigger/caption quality.",
+        "placeholders": ["%prompt%", "%negative_prompt%", "%model%", "%width%", "%height%", "%steps%", "%scale%", "%seed%"],
+        "fields": ["prompt", "negative_prompt", "model", "width", "height", "steps", "cfg_scale", "seed"],
         "workflow_json": DEFAULT_COMFYUI_WORKFLOW,
     },
 ]
@@ -54,6 +67,7 @@ class WorkflowValidationRequest(BaseModel):
 
 
 class WorkflowRenderRequest(BaseModel):
+    preset_id: str | None = Field(default=None, max_length=120)
     prompt: str = Field(min_length=1)
     negative_prompt: str = ""
     width: int = Field(default=1024, ge=128, le=4096)
@@ -69,6 +83,15 @@ class WorkflowRenderRequest(BaseModel):
     workflow_json: str | dict[str, Any] | None = None
     source_module: str = "workflow_hub"
     source_id: str | None = None
+
+
+class WorkflowTemplateSaveRequest(BaseModel):
+    id: str | None = Field(default=None, max_length=120)
+    label: str = Field(min_length=1, max_length=160)
+    task: str = Field(default="custom", max_length=80)
+    description: str = Field(default="", max_length=1000)
+    fields: list[str] = Field(default_factory=list)
+    workflow_json: str | dict[str, Any]
 
 
 class WorkflowRenderResponse(BaseModel):
@@ -102,14 +125,43 @@ def _workflow_summary(workflow: dict[str, Any]) -> dict[str, Any]:
     placeholders: set[str] = set()
     _collect_placeholders(workflow, placeholders)
     class_counts: dict[str, int] = {}
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
     for node in workflow.values():
         if isinstance(node, dict):
             class_type = str(node.get("class_type") or "unknown")
             class_counts[class_type] = class_counts.get(class_type, 0) + 1
+    for node_id, node in sorted(workflow.items(), key=lambda item: str(item[0])):
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        for input_name, input_value in sorted(inputs.items(), key=lambda item: str(item[0])):
+            if (
+                isinstance(input_value, list)
+                and len(input_value) >= 2
+                and str(input_value[0]) in workflow
+            ):
+                edges.append(
+                    {
+                        "from": str(input_value[0]),
+                        "to": str(node_id),
+                        "input": str(input_name),
+                        "output": int(input_value[1]) if isinstance(input_value[1], int) else str(input_value[1]),
+                    }
+                )
+        nodes.append(
+            {
+                "id": str(node_id),
+                "class_type": str(node.get("class_type") or "unknown"),
+                "inputs": sorted(str(key) for key in inputs),
+            }
+        )
     return {
         "node_count": len(workflow),
         "class_counts": class_counts,
         "placeholders": sorted(placeholders),
+        "nodes": nodes,
+        "edges": edges,
     }
 
 
@@ -117,6 +169,94 @@ def _load_studio_image_settings() -> dict[str, Any]:
     from app.studio_features import load_settings
 
     return load_settings().get("image", {})
+
+
+def _slug(value: str, fallback: str = "workflow") -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-._").lower()[:90] or fallback
+
+
+def _workflow_template_root() -> Path:
+    from app.studio_features import DATA
+
+    root = DATA / "integrations" / "comfyui" / "workflow_templates"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _template_path(preset_id: str) -> Path:
+    return _workflow_template_root() / f"{_slug(preset_id)}.json"
+
+
+def _normalize_template(raw: dict[str, Any]) -> dict[str, Any]:
+    workflow = parse_workflow_template(raw.get("workflow_json"))
+    summary = _workflow_summary(workflow)
+    fields = raw.get("fields") if isinstance(raw.get("fields"), list) else []
+    placeholders = raw.get("placeholders") if isinstance(raw.get("placeholders"), list) else summary["placeholders"]
+    return {
+        "id": _slug(str(raw.get("id") or raw.get("label") or "workflow")),
+        "label": str(raw.get("label") or raw.get("id") or "Workflow"),
+        "task": str(raw.get("task") or "custom"),
+        "description": str(raw.get("description") or ""),
+        "fields": [str(item) for item in fields if str(item).strip()],
+        "placeholders": [str(item) for item in placeholders if str(item).strip()],
+        "workflow_json": workflow,
+        "summary": summary,
+    }
+
+
+def _seed_workflow_templates() -> None:
+    root = _workflow_template_root()
+    for preset in WORKFLOW_PRESETS:
+        target = root / f"{preset['id']}.json"
+        if not target.exists():
+            target.write_text(json.dumps(preset, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_workflow_templates() -> list[dict[str, Any]]:
+    _seed_workflow_templates()
+    templates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in sorted(_workflow_template_root().glob("*.json"), key=lambda item: item.name.lower()):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                continue
+            template = _normalize_template(raw)
+        except Exception:
+            continue
+        if template["id"] in seen:
+            continue
+        seen.add(template["id"])
+        templates.append(template)
+    for preset in WORKFLOW_PRESETS:
+        if preset["id"] not in seen:
+            templates.append(_normalize_template(preset))
+    return templates
+
+
+def get_workflow_template(preset_id: str) -> dict[str, Any]:
+    normalized = _slug(preset_id)
+    for template in load_workflow_templates():
+        if template["id"] == normalized:
+            return template
+    raise HTTPException(status_code=404, detail="Workflow template not found.")
+
+
+def save_workflow_template(payload: WorkflowTemplateSaveRequest) -> dict[str, Any]:
+    workflow = parse_workflow_template(payload.workflow_json)
+    template_id = _slug(payload.id or payload.label)
+    template = _normalize_template(
+        {
+            "id": template_id,
+            "label": payload.label,
+            "task": payload.task,
+            "description": payload.description,
+            "fields": payload.fields,
+            "workflow_json": workflow,
+        }
+    )
+    _template_path(template_id).write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
+    return template
 
 
 def _generated_root() -> Path:
@@ -143,8 +283,11 @@ async def render_workflow_job(job: dict[str, Any], manager: JobManager) -> dict[
     if not model_name:
         checkpoints = await asyncio.to_thread(client.list_checkpoints)
         model_name = checkpoints[0] if checkpoints else ""
+    workflow_json: str | dict[str, Any] | None = request_payload.workflow_json
+    if workflow_json is None and request_payload.preset_id:
+        workflow_json = get_workflow_template(request_payload.preset_id)["workflow_json"]
     workflow, seed = build_workflow_from_generation(
-        workflow_json=request_payload.workflow_json if request_payload.workflow_json is not None else image_settings.get("workflow_json") or "",
+        workflow_json=workflow_json if workflow_json is not None else image_settings.get("workflow_json") or "",
         prompt=request_payload.prompt,
         negative_prompt=request_payload.negative_prompt,
         model=model_name,
@@ -173,6 +316,7 @@ async def render_workflow_job(job: dict[str, Any], manager: JobManager) -> dict[
         "model": model_name,
         "seed": seed,
         "workflow": "workflow_hub",
+        "workflow_preset_id": request_payload.preset_id,
         "comfyui_prompt_id": prompt_id,
         "comfyui_output": output,
         "created_at": utc_now_iso(),
@@ -201,7 +345,25 @@ async def render_workflow_job(job: dict[str, Any], manager: JobManager) -> dict[
 
 @router.get("/presets")
 def list_workflow_presets() -> dict[str, Any]:
-    return {"presets": WORKFLOW_PRESETS}
+    return {"presets": load_workflow_templates(), "template_root": str(_workflow_template_root())}
+
+
+@router.get("/templates")
+def list_workflow_templates_alias() -> dict[str, Any]:
+    return list_workflow_presets()
+
+
+@router.get("/presets/{preset_id}")
+def read_workflow_preset(preset_id: str) -> dict[str, Any]:
+    return get_workflow_template(preset_id)
+
+
+@router.post("/presets", status_code=201)
+def write_workflow_preset(payload: WorkflowTemplateSaveRequest) -> dict[str, Any]:
+    try:
+        return save_workflow_template(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/validate")
@@ -243,4 +405,3 @@ async def render_workflow(payload: WorkflowRenderRequest, request: Request) -> W
     if audit is not None:
         audit.record("workflows.render", target=job["id"], payload={"source_module": payload.source_module})
     return WorkflowRenderResponse(job=job, events_url=f"/api/jobs/{job['id']}/events")
-

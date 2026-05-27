@@ -4,11 +4,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import requests
 from app.comfyui_client import ComfyUIClient, build_workflow_from_generation
 from app.semantic_search import SemanticSearchEngine
 from app.v2.assets import AssetRegistry, GeneratedAssetIngestRequest
+from app.v2.workspaces import active_workspace_id
 from app.v2.upload_security import (
     IMAGE_EXTENSIONS,
     MODEL_EXTENSIONS,
@@ -93,6 +95,12 @@ class PromptPayload(BaseModel):
     sampler_name: str = "Euler a"
     scheduler: str = "Automatic"
     seed: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    controlnet_type: str | None = None
+    controlnet_image: str | None = None
+    controlnet_strength: float | None = 0.8
+
 
 
 class ComfyUITestPayload(BaseModel):
@@ -103,6 +111,11 @@ class LlmTestPayload(BaseModel):
     provider: str
     endpoint: str
     model: str = ""
+    api_key: str = ""
+
+class PreprocessControlnetPayload(BaseModel):
+    image_base64: str
+    preprocessor: str = ""
     api_key: str = ""
 
 
@@ -169,6 +182,7 @@ def _studio_modules() -> list[dict]:
         {"id": "dashboard", "label": "Dashboard", "path": "/", "category": "core", "status": "ready"},
         {"id": "training", "label": "Training", "path": "/training", "category": "sdxl", "status": "ready"},
         {"id": "generation", "label": "Generation", "path": "/generation", "category": "sdxl", "status": "ready"},
+        {"id": "video", "label": "Video", "path": "/video", "category": "video", "status": "ready"},
         {"id": "gallery", "label": "Gallery", "path": "/gallery", "category": "library", "status": "ready"},
         {"id": "wildcards", "label": "Wildcards", "path": "/wildcards", "category": "prompting", "status": "ready"},
         {"id": "movie", "label": "Movie Script", "path": "/movie", "category": "story", "status": "ready"},
@@ -187,6 +201,7 @@ def get_manifest():
         "version": "2.0",
         "generated_at": datetime.now(UTC).isoformat(),
         "data_root": str(DATA),
+        "active_workspace_id": active_workspace_id(DATA),
         "modules": _studio_modules(),
         "integrations": {
             "comfyui": {
@@ -215,6 +230,9 @@ def get_manifest():
                 "model": os.getenv("STUDIO_CAPTION_MODEL_ID", "Salesforce/blip-image-captioning-base"),
                 "local_enabled": not _truthy_env("STUDIO_DISABLE_LOCAL_CAPTIONING", False),
                 "download_allowed": _truthy_env("STUDIO_CAPTION_ALLOW_DOWNLOAD", False),
+                "florence_url": os.getenv("STUDIO_FLORENCE_URL", ""),
+                "florence_model": os.getenv("STUDIO_FLORENCE_MODEL_ID", "microsoft/Florence-2-base"),
+                "florence_download_allowed": _truthy_env("STUDIO_FLORENCE_ALLOW_DOWNLOAD", False),
                 "clip_model": os.getenv("STUDIO_CAPTION_CLIP_MODEL_ID", "OysterQAQ/DanbooruCLIP"),
                 "clip_model_source": os.getenv("STUDIO_CAPTION_CLIP_MODEL_SOURCE", "auto"),
                 "clip_download_allowed": _truthy_env("STUDIO_CAPTION_CLIP_ALLOW_DOWNLOAD", False),
@@ -236,6 +254,15 @@ def get_manifest():
             "generation.queue",
             "gallery.sillytavern_card_scan",
             "studio.preflight",
+            "workspaces.profiles",
+            "workflows.template_library",
+            "training.model_families",
+            "copilot.alpha",
+            "video.native",
+            "video.movie_prefill",
+            "captioning.florence2",
+            "workspaces.zip_package",
+            "workflows.node_inspector",
         ],
     }
 
@@ -409,6 +436,17 @@ def test_comfyui(payload: ComfyUITestPayload):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ComfyUI connection failed: {exc}")
 
+@router.get('/comfyui/object_info')
+def get_comfyui_object_info():
+    settings = get_settings()
+    image_settings = settings.get("image_generation", {})
+    endpoint = image_settings.get("comfyui_endpoint")
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="ComfyUI endpoint is not configured.")
+    try:
+        return ComfyUIClient(endpoint, timeout_s=15).object_info()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch ComfyUI object info: {exc}")
 
 @router.post('/llm/test')
 def test_llm(payload: LlmTestPayload):
@@ -438,6 +476,58 @@ def test_llm(payload: LlmTestPayload):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM connection failed: {exc}")
 
+@router.post('/preprocess-controlnet')
+def preprocess_controlnet(payload: PreprocessControlnetPayload):
+    settings = get_settings()
+    image_settings = settings.get("image_generation", {})
+    endpoint = image_settings.get("comfyui_endpoint")
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="ComfyUI endpoint not configured.")
+    
+    try:
+        client = ComfyUIClient(endpoint, timeout_s=120)
+        # Decode base64
+        header, encoded = payload.image_base64.split(',', 1) if ',' in payload.image_base64 else ('', payload.image_base64)
+        img_data = base64.b64decode(encoded)
+        
+        # Upload
+        upload_res = client.upload_image(img_data, f"prep_{uuid.uuid4().hex}.png")
+        uploaded_name = upload_res["name"]
+        
+        # Map simple names to ComfyUI node classes (typically from ComfyUI-Controlnet-Aux)
+        preprocessor_map = {
+            "canny": "CannyEdgePreprocessor",
+            "openpose": "OpenposePreprocessor",
+            "depthanything": "DepthAnythingPreprocessor",
+            "scribble": "ScribblePreprocessor",
+            "lineart": "LineartPreprocessor"
+        }
+        
+        node_class = preprocessor_map.get(payload.preprocessor.lower())
+        if not node_class:
+            node_class = payload.preprocessor # Fallback to literal class name if they pass one
+            
+        workflow = {
+            "1": {
+                "class_type": "LoadImage",
+                "inputs": {"image": uploaded_name}
+            },
+            "2": {
+                "class_type": node_class,
+                "inputs": {"image": ["1", 0]}
+            },
+            "3": {
+                "class_type": "SaveImage",
+                "inputs": {"images": ["2", 0], "filename_prefix": "preproc"}
+            }
+        }
+        
+        image_b64, _, _ = client.render_base64(workflow)
+        return {"image_base64": image_b64}
+        
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Preprocessing failed: {exc}")
+
 @router.post('/models/upload')
 def upload_model(file: UploadFile = File(...)):
     safe_name = safe_upload_name(file.filename, allowed_extensions=MODEL_EXTENSIONS)
@@ -456,8 +546,8 @@ def upload_model(file: UploadFile = File(...)):
 def generate_image(payload: PromptPayload):
     settings = load_settings()
     image_settings = settings.get('image', {})
-    provider = str(image_settings.get('provider') or 'auto').strip().lower()
-    model_name = str(image_settings.get('model', '') or '').strip()
+    provider = payload.provider or str(image_settings.get('provider') or 'auto').strip().lower()
+    model_name = payload.model or str(image_settings.get('model', '') or '').strip()
 
     if provider == "comfyui":
         endpoint = str(image_settings.get("endpoint", "") or "").strip()
@@ -481,6 +571,54 @@ def generate_image(payload: PromptPayload):
                 scheduler=payload.scheduler,
                 seed=payload.seed,
             )
+            
+            # ControlNet logic for ComfyUI
+            if payload.controlnet_type and payload.controlnet_image:
+                # 1. Decode base64 controlnet image
+                header, encoded = payload.controlnet_image.split(',', 1)
+                img_data = base64.b64decode(encoded)
+                # 2. Upload image to ComfyUI
+                upload_res = client.upload_image(img_data, f"controlnet_{uuid.uuid4().hex}.png")
+                uploaded_filename = upload_res["name"]
+                # 3. Find matched controlnet checkpoint
+                controlnet_models = client.list_controlnets()
+                controlnet_model_name = None
+                target_type = payload.controlnet_type.lower()
+                for m in controlnet_models:
+                    if target_type in m.lower():
+                        controlnet_model_name = m
+                        break
+                if not controlnet_model_name:
+                    controlnet_model_name = controlnet_models[0] if controlnet_models else f"controlnet-{target_type}-sdxl.safetensors"
+                # 4. Inject nodes to workflow
+                workflow["10"] = {
+                    "class_type": "LoadImage",
+                    "inputs": {"image": uploaded_filename}
+                }
+                workflow["11"] = {
+                    "class_type": "ControlNetLoader",
+                    "inputs": {"control_net_name": controlnet_model_name}
+                }
+                ksampler_id = None
+                for node_id, node in workflow.items():
+                    if node.get("class_type") == "KSampler":
+                        ksampler_id = node_id
+                        break
+                if ksampler_id:
+                    ksampler = workflow[ksampler_id]
+                    pos_link = ksampler.get("inputs", {}).get("positive")
+                    if pos_link and isinstance(pos_link, list) and len(pos_link) >= 2:
+                        workflow["12"] = {
+                            "class_type": "ControlNetApply",
+                            "inputs": {
+                                "strength": payload.controlnet_strength if payload.controlnet_strength is not None else 0.8,
+                                "conditioning": pos_link,
+                                "control_net": ["11", 0],
+                                "image": ["10", 0]
+                            }
+                        }
+                        ksampler["inputs"]["positive"] = ["12", 0]
+
             image_b64, prompt_id, output = client.render_base64(workflow)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"ComfyUI generation failed: {exc}")
@@ -529,18 +667,67 @@ def generate_image(payload: PromptPayload):
     if local_model_path is not None:
         try:
             import torch
-            from diffusers import StableDiffusionXLPipeline, EulerAncestralDiscreteScheduler, LCMScheduler, DPMSolverMultistepScheduler, DPMSolverSinglestepScheduler
+            from diffusers import (
+                StableDiffusionXLPipeline, 
+                StableDiffusionXLControlNetPipeline, 
+                ControlNetModel,
+                EulerAncestralDiscreteScheduler, 
+                LCMScheduler, 
+                DPMSolverMultistepScheduler, 
+                DPMSolverSinglestepScheduler
+            )
             from PIL import Image as PILImage
             import io
 
             dtype = torch.float16 if torch.cuda.is_available() else torch.float32
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-            pipe = StableDiffusionXLPipeline.from_single_file(
-                str(local_model_path),
-                torch_dtype=dtype,
-                use_safetensors=str(local_model_path).endswith('.safetensors'),
-            ).to(device)
+            # Check if ControlNet is enabled
+            if payload.controlnet_type and payload.controlnet_image:
+                repo_map = {
+                    "canny": "diffusers/controlnet-canny-sdxl-1.0",
+                    "openpose": "thibaud/controlnet-openpose-sdxl-1.0",
+                    "depth": "diffusers/controlnet-depth-sdxl-1.0",
+                    "depthanything": "diffusers/controlnet-depth-sdxl-1.0",
+                    "scribble": "xinsir/controlnet-scribble-sdxl-1.0",
+                    "lineart": "xinsir/controlnet-lineart-sdxl-1.0",
+                }
+                repo_id = repo_map.get(payload.controlnet_type.lower(), "diffusers/controlnet-canny-sdxl-1.0")
+                
+                # 1. Parse and preprocess image
+                header, encoded = payload.controlnet_image.split(',', 1)
+                img_data = base64.b64decode(encoded)
+                control_image = PILImage.open(io.BytesIO(img_data)).convert("RGB")
+                
+                if payload.controlnet_type.lower() == "canny":
+                    import numpy as np
+                    try:
+                        import cv2
+                        np_img = np.array(control_image)
+                        np_img = cv2.Canny(np_img, 100, 200)
+                        np_img = np_img[:, :, None]
+                        np_img = np.concatenate([np_img, np_img, np_img], axis=2)
+                        control_image = PILImage.fromarray(np_img)
+                    except ImportError:
+                        from PIL import ImageFilter
+                        control_image = control_image.filter(ImageFilter.FIND_EDGES)
+                
+                # 2. Load ControlNet
+                controlnet = ControlNetModel.from_pretrained(repo_id, torch_dtype=dtype)
+                
+                # 3. Load Pipeline
+                pipe = StableDiffusionXLControlNetPipeline.from_single_file(
+                    str(local_model_path),
+                    controlnet=controlnet,
+                    torch_dtype=dtype,
+                    use_safetensors=str(local_model_path).endswith('.safetensors'),
+                ).to(device)
+            else:
+                pipe = StableDiffusionXLPipeline.from_single_file(
+                    str(local_model_path),
+                    torch_dtype=dtype,
+                    use_safetensors=str(local_model_path).endswith('.safetensors'),
+                ).to(device)
 
             # Apply sampler/scheduler selection
             sampler = payload.sampler_name.lower()
@@ -557,14 +744,26 @@ def generate_image(payload: PromptPayload):
 
             pipe.enable_attention_slicing()
 
-            result = pipe(
-                prompt=payload.prompt,
-                negative_prompt=payload.negative_prompt or None,
-                width=payload.width,
-                height=payload.height,
-                num_inference_steps=payload.steps,
-                guidance_scale=payload.cfg_scale,
-            )
+            if payload.controlnet_type and payload.controlnet_image:
+                result = pipe(
+                    prompt=payload.prompt,
+                    negative_prompt=payload.negative_prompt or None,
+                    image=control_image,
+                    controlnet_conditioning_scale=payload.controlnet_strength if payload.controlnet_strength is not None else 0.8,
+                    width=payload.width,
+                    height=payload.height,
+                    num_inference_steps=payload.steps,
+                    guidance_scale=payload.cfg_scale,
+                )
+            else:
+                result = pipe(
+                    prompt=payload.prompt,
+                    negative_prompt=payload.negative_prompt or None,
+                    width=payload.width,
+                    height=payload.height,
+                    num_inference_steps=payload.steps,
+                    guidance_scale=payload.cfg_scale,
+                )
             img: PILImage.Image = result.images[0]
 
             # Save and return
@@ -688,6 +887,28 @@ def delete_generated_image(filename: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete image: {exc}")
 
 
+@router.get('/templates/raw')
+def list_raw_templates():
+    template_dir = DATA / "characters" / "template"
+    if not template_dir.exists():
+        return {"images": []}
+    
+    images = []
+    for f in template_dir.iterdir():
+        if f.is_file() and f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.webp']:
+            # We will serve this via static files or a dedicated endpoint. 
+            # But we can just use the static media route if we register it, or read it as base64 for now.
+            images.append(f.name)
+    return {"images": images}
+
+@router.get('/templates/raw/{filename}')
+def get_raw_template(filename: str):
+    template_dir = DATA / "characters" / "template"
+    file_path = template_dir / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Template not found")
+    return FileResponse(file_path)
+
 def _timestamp_ms(value: str | int | float | None) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -752,3 +973,33 @@ def semantic_search(q: str):
         'source': 'studio-registry-fallback',
         'media_indexer': {key: media_result.get(key) for key in ("status", "base_url", "error")},
     }
+
+
+class RemoveBackgroundPayload(BaseModel):
+    image_base64: str
+
+
+@router.post('/remove-background')
+def remove_background(payload: RemoveBackgroundPayload):
+    try:
+        import io
+        from PIL import Image
+        import rembg
+
+        # Decode base64
+        header, encoded = payload.image_base64.split(',', 1)
+        img_data = base64.b64decode(encoded)
+        img = Image.open(io.BytesIO(img_data))
+
+        # Remove background using rembg
+        output_img = rembg.remove(img)
+
+        # Encode back to base64
+        buf = io.BytesIO()
+        output_img.save(buf, format='PNG')
+        buf.seek(0)
+        output_base64 = base64.b64encode(buf.read()).decode('utf-8')
+
+        return {'image_base64': f"data:image/png;base64,{output_base64}"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Background removal failed: {exc}")

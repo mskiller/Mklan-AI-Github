@@ -4,7 +4,7 @@ export type DeviceMode = "mobile" | "desktop";
 
 function detectDeviceMode(): DeviceMode {
   if (typeof window === "undefined") return "desktop";
-  const coarsePointer = window.matchMedia("(hover: none), (pointer: coarse)").matches;
+  const coarsePointer = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
   const narrowViewport = window.matchMedia("(max-width: 820px)").matches;
   return coarsePointer || narrowViewport ? "mobile" : "desktop";
 }
@@ -14,7 +14,7 @@ export function useDeviceMode(): DeviceMode {
 
   useEffect(() => {
     const update = () => setDeviceMode(detectDeviceMode());
-    const pointerQuery = window.matchMedia("(hover: none), (pointer: coarse)");
+    const pointerQuery = window.matchMedia("(hover: none) and (pointer: coarse)");
     const viewportQuery = window.matchMedia("(max-width: 820px)");
     update();
     pointerQuery.addEventListener("change", update);

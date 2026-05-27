@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
   CheckCircle2,
@@ -15,9 +15,10 @@ import {
   WandSparkles,
   XCircle,
 } from 'lucide-react';
+import { useJobEvents } from '../hooks/useJobEvents';
+import { WorkflowNodeInspector, type WorkflowSummary } from '../components/WorkflowNodeInspector';
 
 const API = '/api/generation';
-const JOB_API = '/api/jobs';
 const terminalStatuses = new Set(['succeeded', 'failed', 'canceled']);
 
 type GenerationTab = 'chat' | 'image' | 'images' | 'jobs';
@@ -66,6 +67,22 @@ interface WildcardPreview {
   seed: number;
   refs: Array<{ name: string; source: string; value: string }>;
   missing: string[];
+}
+
+interface WorkflowPreset {
+  id: string;
+  label: string;
+  task: string;
+  description?: string;
+  fields?: string[];
+  placeholders?: string[];
+  summary?: {
+    node_count?: number;
+    class_counts?: Record<string, number>;
+    placeholders?: string[];
+    nodes?: WorkflowSummary['nodes'];
+    edges?: WorkflowSummary['edges'];
+  };
 }
 
 async function readJson<T>(url: string, options?: RequestInit): Promise<T> {
@@ -145,6 +162,7 @@ export function GenerationPage() {
   const [loras, setLoras] = useState<LoraItem[]>([]);
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [jobs, setJobs] = useState<JobRead[]>([]);
+  const [workflowPresets, setWorkflowPresets] = useState<WorkflowPreset[]>([]);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
@@ -165,49 +183,61 @@ export function GenerationPage() {
   const [cfgScale, setCfgScale] = useState(7);
   const [sampler, setSampler] = useState('Euler a');
   const [scheduler, setScheduler] = useState('Automatic');
+  const [workflowPresetId, setWorkflowPresetId] = useState('');
   const [seed, setSeed] = useState('');
   const [batchCount, setBatchCount] = useState(1);
   const [wildcardPreview, setWildcardPreview] = useState<WildcardPreview | null>(null);
   const [currentJob, setCurrentJob] = useState<JobRead | null>(null);
   const [generating, setGenerating] = useState(false);
   const [openImage, setOpenImage] = useState<GeneratedImage | null>(null);
+  const processedTerminalJobs = useRef(new Set<string>());
 
   const latestImages = useMemo(() => images.slice(0, 12), [images]);
+  const selectedWorkflowPreset = useMemo(
+    () => workflowPresets.find((preset) => preset.id === workflowPresetId) || null,
+    [workflowPresetId, workflowPresets],
+  );
 
   const refresh = useCallback(async () => {
-    const [modelsPayload, imagesPayload, jobsPayload] = await Promise.all([
+    const [modelsPayload, imagesPayload, jobsPayload, workflowPayload] = await Promise.all([
       readJson<{ models: ModelItem[]; loras: LoraItem[] }>(`${API}/models`),
       readJson<{ images: GeneratedImage[] }>(`${API}/images`),
       readJson<JobRead[]>(`${API}/jobs`),
+      readJson<{ presets: WorkflowPreset[] }>('/api/workflows/presets'),
     ]);
     setModels(modelsPayload.models || []);
     setLoras(modelsPayload.loras || []);
     setImages(imagesPayload.images || []);
     setJobs(jobsPayload || []);
+    const presets = workflowPayload.presets || [];
+    setWorkflowPresets(presets);
+    setWorkflowPresetId((current) => (current && presets.some((preset) => preset.id === current) ? current : presets[0]?.id || ''));
   }, []);
 
   useEffect(() => {
     void refresh().catch((err: Error) => setError(err.message));
   }, [refresh]);
 
-  useEffect(() => {
-    if (!currentJob || terminalStatuses.has(currentJob.status)) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const job = await readJson<JobRead>(`${JOB_API}/${currentJob.id}`);
-        setCurrentJob(job);
-        setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
-        if (terminalStatuses.has(job.status)) {
-          setGenerating(false);
-          await refresh();
-          setActiveTab(job.status === 'succeeded' ? 'images' : 'jobs');
-        }
-      } catch (err: any) {
-        setError(err.message);
-      }
-    }, 1400);
-    return () => window.clearInterval(timer);
-  }, [currentJob, refresh]);
+  const handleLiveJob = useCallback((job: JobRead) => {
+    setCurrentJob(job);
+    setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+    if (!terminalStatuses.has(job.status) || processedTerminalJobs.current.has(job.id)) {
+      return;
+    }
+    processedTerminalJobs.current.add(job.id);
+    setGenerating(false);
+    void refresh()
+      .then(() => setActiveTab(job.status === 'succeeded' ? 'images' : 'jobs'))
+      .catch((err: Error) => setError(err.message));
+  }, [refresh]);
+  const handleLiveJobError = useCallback((err: Error) => setError(err.message), []);
+
+  useJobEvents(currentJob?.id, {
+    enabled: Boolean(currentJob && !terminalStatuses.has(currentJob.status)),
+    onJob: handleLiveJob,
+    onError: handleLiveJobError,
+    pollIntervalMs: 1400,
+  });
 
   const sendChat = async () => {
     const userMessage: ChatMessage = { role: 'user', content: chatPrompt };
@@ -293,6 +323,7 @@ export function GenerationPage() {
           cfg_scale: cfgScale,
           sampler_name: sampler,
           scheduler,
+          workflow_preset_id: workflowPresetId || undefined,
           seed: seed ? Number(seed) : undefined,
           batch_count: batchCount,
           expand_wildcards: true,
@@ -322,12 +353,12 @@ export function GenerationPage() {
         </button>
       </div>
 
-      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', minWidth: 0 }}>
         {tabConfig.map((tab) => {
           const Icon = tab.icon;
           const active = activeTab === tab.id;
           return (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={active ? 'primary-button' : 'ghost-button'}>
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={active ? 'primary-button' : 'ghost-button'} style={{ minWidth: 0 }}>
               <Icon size={16} />
               {tab.label}
             </button>
@@ -339,7 +370,7 @@ export function GenerationPage() {
       {message ? <div style={{ color: 'var(--success)', border: '1px solid rgba(74,222,128,0.22)', padding: '0.75rem', borderRadius: 8 }}>{message}</div> : null}
 
       {activeTab === 'chat' ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(300px, 0.85fr) minmax(320px, 1.15fr)', gap: '1rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))', gap: '1rem' }}>
           <Section title="Prompt" icon={Bot}>
             <textarea value={chatPrompt} onChange={(event) => setChatPrompt(event.target.value)} style={{ minHeight: 150 }} />
             <label style={{ display: 'grid', gap: '0.35rem', color: 'var(--text-secondary)' }}>
@@ -378,16 +409,17 @@ export function GenerationPage() {
       ) : null}
 
       {activeTab === 'image' ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(340px, 0.95fr) minmax(320px, 1.05fr)', gap: '1rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(340px, 100%), 1fr))', gap: '1rem' }}>
           <Section title="Render Settings" icon={WandSparkles}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.65rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.65rem' }}>
               <label>Provider<select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><option value="auto">Auto</option><option value="comfyui">ComfyUI</option><option value="integrated">Integrated</option></select></label>
               <label>Model<select value={model} onChange={(event) => setModel(event.target.value)}><option value="">Default / auto</option>{models.map((item) => <option key={`${item.provider}:${item.name}`} value={item.name}>{item.name}</option>)}</select></label>
               <label>LoRA<select value={selectedLora} onChange={(event) => setSelectedLora(event.target.value)}><option value="">No LoRA</option>{loras.map((item) => <option key={item.path} value={item.name}>{item.name}</option>)}</select></label>
+              <label>Workflow<select value={workflowPresetId} onChange={(event) => setWorkflowPresetId(event.target.value)}><option value="">Studio default</option>{workflowPresets.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
             </div>
             <label>Positive Prompt<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} style={{ minHeight: 130 }} /></label>
             <label>Negative Prompt<textarea value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} style={{ minHeight: 84 }} /></label>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '0.65rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.65rem' }}>
               <label>Width<input type="number" value={width} onChange={(event) => setWidth(Number(event.target.value) || 512)} /></label>
               <label>Height<input type="number" value={height} onChange={(event) => setHeight(Number(event.target.value) || 512)} /></label>
               <label>Steps<input type="number" value={steps} onChange={(event) => setSteps(Number(event.target.value) || 1)} /></label>
@@ -403,6 +435,18 @@ export function GenerationPage() {
             </div>
           </Section>
           <Section title="Preview & Latest" icon={ImageIcon}>
+            {selectedWorkflowPreset ? (
+              <div style={{ display: 'grid', gap: '0.65rem' }}>
+              <div style={{ border: '1px solid var(--border-color)', borderRadius: 8, padding: '0.75rem', display: 'grid', gap: '0.35rem' }}>
+                <strong>{selectedWorkflowPreset.label}</strong>
+                {selectedWorkflowPreset.description ? <p style={{ color: 'var(--text-secondary)', margin: 0 }}>{selectedWorkflowPreset.description}</p> : null}
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                  {selectedWorkflowPreset.task} · {selectedWorkflowPreset.summary?.node_count ?? 0} nodes · {(selectedWorkflowPreset.placeholders || selectedWorkflowPreset.summary?.placeholders || []).length} placeholders
+                </span>
+              </div>
+              <WorkflowNodeInspector summary={selectedWorkflowPreset.summary} />
+              </div>
+            ) : null}
             {wildcardPreview ? (
               <div style={{ border: '1px solid var(--border-color)', borderRadius: 8, padding: '0.75rem', display: 'grid', gap: '0.45rem' }}>
                 <strong>Expanded Prompt</strong>

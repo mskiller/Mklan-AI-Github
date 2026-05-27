@@ -1560,6 +1560,28 @@ def create_app() -> FastAPI:
     def wildcard_bridge_suggestions(q: str = "", limit: int = Query(default=30, ge=1, le=100)) -> dict:
         return app.state.wildcard_bridge_service.suggestions(q, limit)
 
+    @app.post("/projects/{project_id}/assets/upload")
+    async def upload_project_asset(
+        project_id: str,
+        asset_path: str = Form(...),
+        file: UploadFile = File(...)
+    ) -> dict:
+        detail = _load_project_or_404(app.state.repository, project_id)
+        _ensure_project_editable(detail)
+
+        project_root = app.state.repository.ensure_project_assets(project_id)
+        target_path = (project_root / asset_path).resolve()
+        
+        # Directory traversal protection
+        if not str(target_path).startswith(str(project_root.resolve())):
+            raise HTTPException(status_code=400, detail="Invalid asset path.")
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        content = await file.read()
+        target_path.write_bytes(content)
+
+        return {"relative_path": asset_path}
+
     @app.get("/assets/{project_id}/{asset_path:path}")
     @app.head("/assets/{project_id}/{asset_path:path}")
     def get_asset(project_id: str, asset_path: str) -> FileResponse:

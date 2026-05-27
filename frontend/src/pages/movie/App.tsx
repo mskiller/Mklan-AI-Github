@@ -1831,6 +1831,24 @@ function App() {
     }
   }
 
+  function openNativeVideoClip(sequence: Sequence) {
+    if (!project) {
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set("movie_project_id", project.id);
+    params.set("scene_id", sequence.scene_id);
+    params.set("sequence_id", sequence.id);
+    if (sequence.wan_prompt_text.trim()) {
+      params.set("prompt", sequence.wan_prompt_text);
+    }
+    const frameUrl = sequence.input_frame_asset?.asset_url || "";
+    if (frameUrl.startsWith("/generated/")) {
+      params.set("reference_image", frameUrl);
+    }
+    window.location.href = `/video?${params.toString()}`;
+  }
+
   async function handleApproveSequenceVideo(sequenceId: string, assetId: string) {
     if (!project || !isProjectEditable) {
       return;
@@ -3312,6 +3330,7 @@ function App() {
                               >
                                 <option value="mock">Mock</option>
                                 <option value="lightx2v">LightX2V (Wan)</option>
+                                <option value="wan_gguf">Wan GGUF</option>
                               </select>
                             </label>
                             <label className="field">
@@ -6504,6 +6523,13 @@ function App() {
                     <div className="action-row">
                       <button
                         className="ghost-button"
+                        onClick={() => (selectedSequence ? openNativeVideoClip(selectedSequence) : undefined)}
+                        disabled={!selectedSequence}
+                      >
+                        Open Native Video
+                      </button>
+                      <button
+                        className="ghost-button"
                         onClick={() => (selectedSequence ? void handleGenerateSequenceVideo(selectedSequence.id) : undefined)}
                         disabled={!isProjectEditable || Boolean(selectedSequenceVideoDisabledReason)}
                       >
@@ -6644,6 +6670,12 @@ function App() {
                               disabled={!isProjectEditable}
                             >
                               Redo This Wan Prompt
+                            </button>
+                            <button
+                              className="ghost-button"
+                              onClick={() => openNativeVideoClip(selectedSequence)}
+                            >
+                              Generate Video Clip
                             </button>
                             <button
                               className="primary-button"

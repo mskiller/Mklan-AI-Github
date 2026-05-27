@@ -1274,7 +1274,7 @@ export function App() {
               )}
               <label>
                 Wildcard refs
-                <input value={wildcardRefs} onChange={(event) => setWildcardRefs(event.target.value)} placeholder="starter/styles, starter/subjects" />
+                <input value={wildcardRefs} onChange={(event) => setWildcardRefs(event.target.value)} placeholder="ziggart/zig-style, mskiller/mklan-female-card" />
               </label>
               <label>
                 Negative tags

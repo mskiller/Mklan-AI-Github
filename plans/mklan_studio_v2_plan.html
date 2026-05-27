@@ -1,0 +1,296 @@
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font-sans); }
+  .page { padding: 1.5rem 0; }
+  .header { margin-bottom: 2rem; }
+  .header h1 { font-size: 22px; font-weight: 500; color: var(--color-text-primary); }
+  .header p { font-size: 14px; color: var(--color-text-secondary); margin-top: 6px; line-height: 1.6; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 500; padding: 3px 10px; border-radius: 20px; margin-left: 8px; vertical-align: middle; }
+  .badge-new { background: var(--color-background-success); color: var(--color-text-success); }
+  .badge-upgrade { background: var(--color-background-info); color: var(--color-text-info); }
+  .badge-infra { background: var(--color-background-warning); color: var(--color-text-warning); }
+
+  .tier-label { font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: var(--color-text-tertiary); text-transform: uppercase; margin-bottom: 12px; }
+
+  .upgrade-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
+  .upgrade-grid.single { grid-template-columns: 1fr; }
+
+  .card {
+    background: var(--color-background-primary);
+    border: 0.5px solid var(--color-border-tertiary);
+    border-radius: var(--border-radius-lg);
+    padding: 1rem 1.25rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+  }
+  .card:hover { border-color: var(--color-border-secondary); background: var(--color-background-secondary); }
+  .card.active { border-color: var(--color-border-info); }
+
+  .card-icon { font-size: 22px; margin-bottom: 8px; color: var(--color-text-secondary); }
+  .card-title { font-size: 15px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 4px; }
+  .card-sub { font-size: 12px; color: var(--color-text-secondary); line-height: 1.5; }
+  .card-num {
+    position: absolute; top: 10px; right: 12px;
+    font-size: 28px; font-weight: 500; color: var(--color-border-secondary);
+    line-height: 1;
+  }
+
+  .detail-panel {
+    background: var(--color-background-secondary);
+    border: 0.5px solid var(--color-border-tertiary);
+    border-radius: var(--border-radius-lg);
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 24px;
+    display: none;
+  }
+  .detail-panel.visible { display: block; }
+  .detail-panel h3 { font-size: 16px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 10px; }
+  .detail-panel p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.7; margin-bottom: 10px; }
+  .detail-panel p:last-child { margin-bottom: 0; }
+  .detail-panel strong { font-weight: 500; color: var(--color-text-primary); }
+
+  .impact-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .impact-chip { font-size: 11px; padding: 3px 10px; border-radius: 20px; border: 0.5px solid var(--color-border-secondary); color: var(--color-text-secondary); }
+
+  .phase-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+  .phase-card {
+    background: var(--color-background-primary);
+    border: 0.5px solid var(--color-border-tertiary);
+    border-radius: var(--border-radius-md);
+    padding: 0.75rem 1rem;
+  }
+  .phase-card .phase-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-tertiary); margin-bottom: 4px; }
+  .phase-card .phase-title { font-size: 13px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 6px; }
+  .phase-card ul { list-style: none; }
+  .phase-card ul li { font-size: 11px; color: var(--color-text-secondary); padding: 2px 0; }
+  .phase-card ul li::before { content: "→ "; color: var(--color-text-tertiary); }
+
+  .divider { border: none; border-top: 0.5px solid var(--color-border-tertiary); margin: 20px 0; }
+
+  .stack-note { font-size: 12px; color: var(--color-text-tertiary); font-style: italic; margin-top: 16px; text-align: center; }
+</style>
+
+<div class="page">
+  <div class="header">
+    <h1>Mklan Studio — v2 Upgrade Plan</h1>
+    <p>Seven targeted upgrades ranked by impact. Click any card to expand the full rationale, implementation notes, and affected modules.</p>
+  </div>
+
+  <div class="tier-label">Core Infrastructure <span class="badge badge-infra">Foundation</span></div>
+  <div class="upgrade-grid">
+    <div class="card" id="c1" onclick="toggle(1)">
+      <div class="card-num">1</div>
+      <div class="card-icon"><i class="ti ti-bolt" aria-hidden="true"></i></div>
+      <div class="card-title">Async Job Queue with WebSocket Progress <span class="badge badge-infra">Infra</span></div>
+      <div class="card-sub">Replace SQLite-backed job polling with ARQ + Redis and real-time SSE/WebSocket updates across all long-running tasks.</div>
+    </div>
+    <div class="card" id="c2" onclick="toggle(2)">
+      <div class="card-num">2</div>
+      <div class="card-icon"><i class="ti ti-database" aria-hidden="true"></i></div>
+      <div class="card-title">PostgreSQL for Core Backend <span class="badge badge-infra">Infra</span></div>
+      <div class="card-sub">Migrate Studio's main SQLite stores to the existing Postgres + pgvector instance for concurrent writes, full-text search, and vector lookups.</div>
+    </div>
+  </div>
+
+  <div id="d1" class="detail-panel">
+    <h3>1 · Async Job Queue with Real-time Progress</h3>
+    <p><strong>Problem now:</strong> Training runs, gallery scans, caption jobs, and image generation all use a custom SQLite-backed job manager that the frontend polls. This creates noisy HTTP traffic, stale UI states, and makes cross-module job visibility hard to build.</p>
+    <p><strong>v2 approach:</strong> Introduce <strong>ARQ</strong> (async Redis Queue) or <strong>Celery + Redis</strong> as the task broker. Every long-running task (LoRA training, ComfyUI job, media scan, caption scan) becomes a proper async worker task. The frontend subscribes to a <strong>Server-Sent Events (SSE)</strong> stream or a lightweight WebSocket channel for live progress, log tail, and completion events — no more polling.</p>
+    <p><strong>Key benefits:</strong> Retries, priority queues, dead-letter handling, cross-module job dashboard in one shared view. Redis already lives next to Postgres in Docker Compose — adding it is one service entry.</p>
+    <div class="impact-row">
+      <span class="impact-chip">Training module</span>
+      <span class="impact-chip">Generation module</span>
+      <span class="impact-chip">Gallery scans</span>
+      <span class="impact-chip">Dashboard</span>
+      <span class="impact-chip">New: Redis service</span>
+    </div>
+  </div>
+
+  <div id="d2" class="detail-panel">
+    <h3>2 · PostgreSQL Migration for Core Backend Data</h3>
+    <p><strong>Problem now:</strong> Studio's main data (wildcards, movie scripts, cards, training runs) lives in separate SQLite files. SQLite has no concurrent writer support, no vector search, and no FTS beyond FTS5. The Media Indexer already runs Postgres + pgvector — but that's isolated to the Gallery module.</p>
+    <p><strong>v2 approach:</strong> Move all core FastAPI models to Postgres using <strong>SQLModel + Alembic</strong> migrations. Consolidate into a single schema with per-module namespacing (prefixed tables or schemas). This unlocks: full-text search across wildcards, movie beats, and card lore in one query; pgvector similarity search for "find images similar to this prompt"; and safe concurrent writes from multiple workers.</p>
+    <p><strong>Migration strategy:</strong> Write a one-time migration script using the existing <code>backend/migrations/</code> tooling. Keep SQLite as fallback behind a feature flag for the first release.</p>
+    <div class="impact-row">
+      <span class="impact-chip">Wildcards</span>
+      <span class="impact-chip">Movie Script</span>
+      <span class="impact-chip">Cards</span>
+      <span class="impact-chip">Training</span>
+      <span class="impact-chip">Gallery (unified)</span>
+    </div>
+  </div>
+
+  <hr class="divider">
+  <div class="tier-label">Generation Engine <span class="badge badge-upgrade">Upgrade</span></div>
+  <div class="upgrade-grid">
+    <div class="card" id="c3" onclick="toggle(3)">
+      <div class="card-num">3</div>
+      <div class="card-icon"><i class="ti ti-photo-ai" aria-hidden="true"></i></div>
+      <div class="card-title">Full ComfyUI Workflow Engine <span class="badge badge-upgrade">Upgrade</span></div>
+      <div class="card-sub">Upgrade from basic ComfyUI-compatible job dispatch to a full template-based workflow manager with ControlNet, IP-Adapter, and multi-step pipelines.</div>
+    </div>
+    <div class="card" id="c4" onclick="toggle(4)">
+      <div class="card-num">4</div>
+      <div class="card-icon"><i class="ti ti-movie" aria-hidden="true"></i></div>
+      <div class="card-title">Flux + SDXL Pony Training Support <span class="badge badge-upgrade">Upgrade</span></div>
+      <div class="card-sub">Extend the Training module to support Flux LoRA training via SimpleTuner or Kohya-ss Flux branch, alongside existing SDXL pipelines.</div>
+    </div>
+  </div>
+
+  <div id="d3" class="detail-panel">
+    <h3>3 · Full ComfyUI Workflow Engine</h3>
+    <p><strong>Problem now:</strong> The Generation module dispatches basic ComfyUI-compatible image jobs with a fixed node graph. There's already a <code>plans/v2-comfyui-image-generator.md</code> in the repo — this is the planned direction. Users who want ControlNet poses, IP-Adapter style transfer, or Hires Fix must leave Studio entirely and go to the ComfyUI UI.</p>
+    <p><strong>v2 approach:</strong> Build a <strong>Workflow Template Library</strong> inside Studio. Store ComfyUI API-format JSON templates in <code>data/integrations/comfyui/</code>. The UI lets users pick a template (txt2img, img2img, ControlNet openpose, IP-Adapter, upscale), fill in the variable fields (prompt, strength, seed, checkpoint, LoRA weights), and dispatch. The backend validates against a schema and sends the assembled workflow to the ComfyUI API endpoint. Add a <strong>result websocket</strong> listener that streams ComfyUI's native progress events into the shared job queue from upgrade #1.</p>
+    <p><strong>Phase 2:</strong> A simple visual node inspector (read-only) showing which nodes are in the active workflow — not a full editor, just transparency.</p>
+    <div class="impact-row">
+      <span class="impact-chip">Generation module</span>
+      <span class="impact-chip">Movie module (image/video jobs)</span>
+      <span class="impact-chip">ComfyUI integration</span>
+      <span class="impact-chip">data/integrations/comfyui/</span>
+    </div>
+  </div>
+
+  <div id="d4" class="detail-panel">
+    <h3>4 · Flux + SDXL Pony Training Support</h3>
+    <p><strong>Problem now:</strong> The Training module is built around SDXL LoRA via Kohya-ss. Flux has become the dominant local image model architecture in 2025 — Flux.1 Dev/Schnell and its LoRA variants are now what most serious creators train. The existing training UI assumes SDXL dataset structure and captioning conventions.</p>
+    <p><strong>v2 approach:</strong> Add a <strong>model family selector</strong> at the top of the Training module (SDXL / SDXL Pony / Flux.1 / SD 1.5). Each family configures: default trainer backend (<code>Dockerfile.gpu</code> for SDXL Kohya, <strong>SimpleTuner</strong> or Kohya Flux branch for Flux), dataset caption format (natural language for Flux vs tag-based for SDXL), recommended resolution and batch sizes, and trigger word conventions. The caption scan providers already in the UI need a Flux-specific mode (longer natural-language captions, no Danbooru tag vocabulary).</p>
+    <p><strong>Data directory addition:</strong> <code>data/models/images/Flux/</code> alongside <code>Base/</code> for SDXL checkpoints.</p>
+    <div class="impact-row">
+      <span class="impact-chip">Training module</span>
+      <span class="impact-chip">Caption scan</span>
+      <span class="impact-chip">Model inventory</span>
+      <span class="impact-chip">Settings</span>
+      <span class="impact-chip">GPU Dockerfile</span>
+    </div>
+  </div>
+
+  <hr class="divider">
+  <div class="tier-label">New Modules <span class="badge badge-new">New</span></div>
+  <div class="upgrade-grid">
+    <div class="card" id="c5" onclick="toggle(5)">
+      <div class="card-num">5</div>
+      <div class="card-icon"><i class="ti ti-video" aria-hidden="true"></i></div>
+      <div class="card-title">Video Generation Module <span class="badge badge-new">New</span></div>
+      <div class="card-sub">Add a /video route for local video diffusion (Wan2.1, CogVideoX). data/models/video/ already exists — activate it.</div>
+    </div>
+    <div class="card" id="c6" onclick="toggle(6)">
+      <div class="card-num">6</div>
+      <div class="card-icon"><i class="ti ti-brain" aria-hidden="true"></i></div>
+      <div class="card-title">Cross-Module AI Copilot <span class="badge badge-new">New</span></div>
+      <div class="card-sub">A context-aware LLM layer that works across modules: auto-caption datasets, suggest wildcard variations, expand movie beats, and propose LoRA training captions.</div>
+    </div>
+  </div>
+
+  <div id="d5" class="detail-panel">
+    <h3>5 · Video Generation Module</h3>
+    <p><strong>Opportunity:</strong> The data layout already has <code>data/models/video/</code> — it's a placeholder waiting for a UI. Local video diffusion (Wan2.1, CogVideoX-5B, AnimateDiff) is now practical on consumer GPUs. The Movie Script module already generates image/video prompts per scene — connecting those to an actual video backend closes a huge loop.</p>
+    <p><strong>v2 approach:</strong> Add a <strong>/video</strong> route (new nav item). The module supports: text-to-video with a prompt + model selector; image-to-video (upload a keyframe or pick from Gallery); duration and resolution controls; and a clip browser backed by <code>data/generated/video/</code>. ComfyUI can serve as the video backend via the workflow engine from upgrade #3 (using AnimateDiff or Wan nodes), or a direct VideoCrafter/Wan2.1 API endpoint configurable in Settings.</p>
+    <p><strong>Movie integration:</strong> Each scene card in the Movie module gets a "Generate video clip" button that opens a pre-filled Video job with the scene's prompt, characters, and style tags already populated.</p>
+    <div class="impact-row">
+      <span class="impact-chip">New: /video route</span>
+      <span class="impact-chip">Movie module</span>
+      <span class="impact-chip">Gallery (clip indexing)</span>
+      <span class="impact-chip">data/models/video/</span>
+      <span class="impact-chip">data/generated/video/</span>
+    </div>
+  </div>
+
+  <div id="d6" class="detail-panel">
+    <h3>6 · Cross-Module AI Copilot Layer</h3>
+    <p><strong>Problem now:</strong> The LLM chat in Generation and the Scenario Assistant in Movie are isolated. If you're editing a wildcard, you can't ask the AI to suggest variations. If you're reviewing training captions, there's no in-context AI help. The local LLM endpoint is already configured — it's just not surfaced everywhere.</p>
+    <p><strong>v2 approach:</strong> Build a lightweight <strong>Copilot sidebar</strong> (collapsible panel, available in every module) powered by the same OpenAI-compatible LLM endpoint. Each module injects its own context into the system prompt: the Wildcards module sends the current wildcard category and 10 existing entries; the Training module sends the caption being reviewed plus the dataset style; the Movie module sends the active scene beat. The sidebar offers context-appropriate suggestions — "3 more wildcard variants", "improve this caption for Flux training", "write a beat between these two scenes".</p>
+    <p><strong>Auto-caption upgrade:</strong> In the Training module, add a Florence-2 / BLIP-2 option that runs locally in a Docker sidecar and produces captions directly in the sidebar — no external API needed.</p>
+    <div class="impact-row">
+      <span class="impact-chip">All modules</span>
+      <span class="impact-chip">Training (auto-caption)</span>
+      <span class="impact-chip">Wildcards</span>
+      <span class="impact-chip">Movie Script</span>
+      <span class="impact-chip">New: Florence-2 sidecar</span>
+    </div>
+  </div>
+
+  <hr class="divider">
+  <div class="tier-label">UX & DevEx <span class="badge badge-upgrade">Upgrade</span></div>
+  <div class="upgrade-grid single">
+    <div class="card" id="c7" onclick="toggle(7)">
+      <div class="card-num">7</div>
+      <div class="card-icon"><i class="ti ti-user-circle" aria-hidden="true"></i></div>
+      <div class="card-title">Multi-Project Workspace Profiles <span class="badge badge-upgrade">Upgrade</span></div>
+      <div class="card-sub">Lightweight named workspaces so different creative projects (a sci-fi movie, a fantasy character pack, a portrait LoRA) each get isolated wildcard libraries, model preferences, movie scripts, and card vaults — without running separate Docker stacks.</div>
+    </div>
+  </div>
+
+  <div id="d7" class="detail-panel">
+    <h3>7 · Multi-Project Workspace Profiles</h3>
+    <p><strong>Problem now:</strong> All of Studio's data lives in flat directories under <code>data/</code>. If you're working on two different creative projects — say a sci-fi movie and a portrait LoRA series — their wildcards, training datasets, and card vaults all mix together. The only isolation today is file naming conventions.</p>
+    <p><strong>v2 approach:</strong> Introduce a <strong>Workspace</strong> concept: a named profile (stored as a row in Postgres, from upgrade #2) that scopes all module data. Switching workspaces swaps the active wildcard source set, the movie project, the card vault, the preferred checkpoint and LoRA weights, and the ComfyUI workflow templates. The UI shows the active workspace name in the top nav with a quick-switch dropdown. Gallery and generated images remain global (shared pool) but can be filtered by workspace tag.</p>
+    <p><strong>Implementation:</strong> A <code>workspace_id</code> foreign key added to every core table. A minimal Workspace CRUD page under Settings. No authentication required — this is still a single-user trusted-local tool. Import/export a workspace as a ZIP for backup or sharing between machines.</p>
+    <div class="impact-row">
+      <span class="impact-chip">All modules</span>
+      <span class="impact-chip">Settings</span>
+      <span class="impact-chip">Navigation</span>
+      <span class="impact-chip">data/ layout</span>
+      <span class="impact-chip">Postgres schema</span>
+    </div>
+  </div>
+
+  <hr class="divider">
+  <div class="tier-label">Suggested v2 Delivery Phases</div>
+  <div class="phase-row">
+    <div class="phase-card">
+      <div class="phase-label">Phase 1 — Foundation</div>
+      <div class="phase-title">Infra & Data</div>
+      <ul>
+        <li>Redis + ARQ job queue</li>
+        <li>SSE/WS progress</li>
+        <li>Postgres migration</li>
+        <li>pgvector unified search</li>
+      </ul>
+    </div>
+    <div class="phase-card">
+      <div class="phase-label">Phase 2 — Engine</div>
+      <div class="phase-title">Generation Power</div>
+      <ul>
+        <li>ComfyUI workflow templates</li>
+        <li>Flux training support</li>
+        <li>Multi-workspace profiles</li>
+        <li>Copilot sidebar (alpha)</li>
+      </ul>
+    </div>
+    <div class="phase-card">
+      <div class="phase-label">Phase 3 — Expansion</div>
+      <div class="phase-title">New Surfaces</div>
+      <ul>
+        <li>Video generation module</li>
+        <li>Florence-2 auto-caption</li>
+        <li>Workspace import/export</li>
+        <li>Node inspector (ComfyUI)</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="stack-note">Stack additions: Redis · ARQ · SQLModel + Alembic · SSE · SimpleTuner · Florence-2 sidecar · Wan2.1 endpoint</p>
+</div>
+
+<script>
+  let open = null;
+  function toggle(n) {
+    const card = document.getElementById('c'+n);
+    const panel = document.getElementById('d'+n);
+    if (open === n) {
+      panel.classList.remove('visible');
+      card.classList.remove('active');
+      open = null;
+    } else {
+      if (open) {
+        document.getElementById('d'+open).classList.remove('visible');
+        document.getElementById('c'+open).classList.remove('active');
+      }
+      panel.classList.add('visible');
+      card.classList.add('active');
+      open = n;
+    }
+  }
+</script>

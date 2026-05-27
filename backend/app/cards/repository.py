@@ -236,8 +236,8 @@ class MovieRepository:
                     lorebook_scan_depth, lorebook_token_budget, lorebook_recursive_scanning,
                     scenario_image_relative_path, genre, tone,
                     gm_card_profile_json, model_settings_override_json, archived_at, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , workspace_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, \'default\')
                 """,
                 (
                     project_id,
@@ -266,8 +266,8 @@ class MovieRepository:
                     first_message, tags_json, persona_note, persona_note_depth, persona_note_role,
                     appearance_summary, booru_character_name,
                     booru_copyright, portrait_relative_path, cowboy_shot_relative_path,
-                    fullbody_shot_relative_path, created_at, updated_at
-                ) VALUES (?, ?, '', '', '', '', '', '[]', '', 4, 'system', '', '', '', NULL, NULL, NULL, ?, ?)
+                    fullbody_shot_relative_path, created_at, updated_at, workspace_id
+                ) VALUES (%s, %s, '', '', '', '', '', '[]', '', 4, 'system', '', '', '', NULL, NULL, NULL, %s, %s, 'default')
                 """,
                 (project_id, "User", now, now),
             )
@@ -276,24 +276,24 @@ class MovieRepository:
 
     def get_project_record(self, project_id: str) -> dict | None:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            row = connection.execute("SELECT * FROM projects WHERE id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
         return None if row is None else self._project_from_row(row)
 
     def get_project_detail(self, project_id: str) -> dict | None:
         with self.database.connect() as connection:
-            project_row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            project_row = connection.execute("SELECT * FROM projects WHERE id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
             if project_row is None:
                 return None
             character_rows = connection.execute(
-                "SELECT * FROM characters WHERE project_id = ? ORDER BY created_at ASC", (project_id,)
+                "SELECT * FROM characters WHERE project_id = %s AND workspace_id = \'default\' ORDER BY created_at ASC", (project_id,)
             ).fetchall()
             lore_rows = connection.execute(
-                "SELECT * FROM lore_entries WHERE project_id = ? ORDER BY insertion_order ASC, created_at ASC",
+                "SELECT * FROM lore_entries WHERE project_id = %s AND workspace_id = \'default\' ORDER BY insertion_order ASC, created_at ASC",
                 (project_id,),
             ).fetchall()
-            user_row = connection.execute("SELECT * FROM user_profiles WHERE project_id = ?", (project_id,)).fetchone()
+            user_row = connection.execute("SELECT * FROM user_profiles WHERE project_id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
             run_rows = connection.execute(
-                "SELECT * FROM generation_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 25", (project_id,)
+                "SELECT * FROM generation_runs WHERE project_id = %s AND workspace_id = \'default\' ORDER BY created_at DESC LIMIT 25", (project_id,)
             ).fetchall()
 
         project = self._project_from_row(project_row)
@@ -325,15 +325,15 @@ class MovieRepository:
         values: list[object] = []
         now = utc_now_iso()
         for key, value in clean_updates.items():
-            assignments.append(f"{key} = ?")
+            assignments.append(f"{key} = %s")
             values.append(value)
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         values.append(project_id)
 
         with self.database.connect() as connection:
             cursor = connection.execute(
-                f"UPDATE projects SET {', '.join(assignments)} WHERE id = ?",
+                f"UPDATE projects SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'",
                 values,
             )
             if cursor.rowcount == 0:
@@ -343,7 +343,7 @@ class MovieRepository:
     def get_gm_card_profile(self, project_id: str) -> dict | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT name, scenario_text, gm_card_profile_json FROM projects WHERE id = ?",
+                "SELECT name, scenario_text, gm_card_profile_json FROM projects WHERE id = %s AND workspace_id = \'default\'",
                 (project_id,),
             ).fetchone()
         if row is None:
@@ -371,7 +371,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE projects SET gm_card_profile_json = ?, updated_at = ? WHERE id = ?",
+                "UPDATE projects SET gm_card_profile_json = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (json.dumps(normalized), now, project_id),
             )
             if cursor.rowcount == 0:
@@ -381,12 +381,12 @@ class MovieRepository:
     def archive_project(self, project_id: str) -> dict | None:
         now = utc_now_iso()
         with self.database.connect() as connection:
-            row = connection.execute("SELECT archived_at FROM projects WHERE id = ?", (project_id,)).fetchone()
+            row = connection.execute("SELECT archived_at FROM projects WHERE id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
             if row is None:
                 return None
             archived_at = row["archived_at"] or now
             connection.execute(
-                "UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ?",
+                "UPDATE projects SET archived_at = %s, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (archived_at, now, project_id),
             )
         return self.get_project_detail(project_id)
@@ -395,7 +395,7 @@ class MovieRepository:
         now = utc_now_iso()
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE projects SET archived_at = NULL, updated_at = ? WHERE id = ?",
+                "UPDATE projects SET archived_at = NULL, updated_at = %s WHERE id = %s AND workspace_id = \'default\'",
                 (now, project_id),
             )
             if cursor.rowcount == 0:
@@ -405,12 +405,12 @@ class MovieRepository:
     def delete_project(self, project_id: str) -> bool | None:
         root = self.settings.projects_root / project_id
         with self.database.connect() as connection:
-            row = connection.execute("SELECT archived_at FROM projects WHERE id = ?", (project_id,)).fetchone()
+            row = connection.execute("SELECT archived_at FROM projects WHERE id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
             if row is None:
                 return None
             if not row["archived_at"]:
                 return False
-            connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            connection.execute("DELETE FROM projects WHERE id = %s AND workspace_id = \'default\'", (project_id,))
         if root.exists():
             shutil.rmtree(root, ignore_errors=False)
         return True
@@ -418,13 +418,13 @@ class MovieRepository:
     def list_characters(self, project_id: str) -> list[dict]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM characters WHERE project_id = ? ORDER BY created_at ASC", (project_id,)
+                "SELECT * FROM characters WHERE project_id = %s AND workspace_id = \'default\' ORDER BY created_at ASC", (project_id,)
             ).fetchall()
         return [self._character_from_row(row) for row in rows]
 
     def get_character(self, character_id: str) -> dict | None:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM characters WHERE id = ?", (character_id,)).fetchone()
+            row = connection.execute("SELECT * FROM characters WHERE id = %s AND workspace_id = \'default\'", (character_id,)).fetchone()
         return None if row is None else self._character_from_row(row)
 
     def create_character(self, project_id: str, payload: dict) -> dict | None:
@@ -442,8 +442,8 @@ class MovieRepository:
                     creator, character_version, character_note, character_note_depth, character_note_role, talkativeness,
                     appearance_summary, booru_character_name, booru_copyright,
                     avatar_relative_path, portrait_relative_path, cowboy_shot_relative_path,
-                    fullbody_shot_relative_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    fullbody_shot_relative_path, created_at, updated_at, workspace_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
                 """,
                 (
                     char_id,
@@ -476,13 +476,13 @@ class MovieRepository:
                     now,
                 ),
             )
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, project_id))
         return self.get_character(char_id)
 
     def replace_characters(self, project_id: str, characters: list[dict]) -> list[dict]:
         now = utc_now_iso()
         with self.database.connect() as connection:
-            connection.execute("DELETE FROM characters WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM characters WHERE project_id = %s AND workspace_id = \'default\'", (project_id,))
             for item in characters:
                 char_id = str(uuid.uuid4())
                 connection.execute(
@@ -494,8 +494,8 @@ class MovieRepository:
                         creator, character_version, character_note, character_note_depth, character_note_role, talkativeness,
                         appearance_summary, booru_character_name, booru_copyright,
                         avatar_relative_path, portrait_relative_path, cowboy_shot_relative_path,
-                        fullbody_shot_relative_path, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        fullbody_shot_relative_path, created_at, updated_at, workspace_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
                     """,
                     (
                         char_id,
@@ -528,7 +528,7 @@ class MovieRepository:
                         now,
                     ),
                 )
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, project_id))
         return self.list_characters(project_id)
 
     def update_character(self, character_id: str, updates: dict) -> dict | None:
@@ -549,42 +549,42 @@ class MovieRepository:
         assignments = []
         values: list[object] = []
         for key, value in clean.items():
-            assignments.append(f"{key} = ?")
+            assignments.append(f"{key} = %s")
             values.append(value)
         now = utc_now_iso()
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         values.append(character_id)
 
         with self.database.connect() as connection:
-            row = connection.execute("SELECT project_id FROM characters WHERE id = ?", (character_id,)).fetchone()
+            row = connection.execute("SELECT project_id FROM characters WHERE id = %s AND workspace_id = \'default\'", (character_id,)).fetchone()
             if row is None:
                 return None
-            connection.execute(f"UPDATE characters SET {', '.join(assignments)} WHERE id = ?", values)
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, row["project_id"]))
+            connection.execute(f"UPDATE characters SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'", values)
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, row["project_id"]))
         return self.get_character(character_id)
 
     def delete_character(self, character_id: str) -> bool:
         now = utc_now_iso()
         with self.database.connect() as connection:
-            row = connection.execute("SELECT project_id FROM characters WHERE id = ?", (character_id,)).fetchone()
+            row = connection.execute("SELECT project_id FROM characters WHERE id = %s AND workspace_id = \'default\'", (character_id,)).fetchone()
             if row is None:
                 return False
-            connection.execute("DELETE FROM characters WHERE id = ?", (character_id,))
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, row["project_id"]))
+            connection.execute("DELETE FROM characters WHERE id = %s AND workspace_id = \'default\'", (character_id,))
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, row["project_id"]))
         return True
 
     def list_lore_entries(self, project_id: str) -> list[dict]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM lore_entries WHERE project_id = ? ORDER BY insertion_order ASC, created_at ASC",
+                "SELECT * FROM lore_entries WHERE project_id = %s AND workspace_id = \'default\' ORDER BY insertion_order ASC, created_at ASC",
                 (project_id,),
             ).fetchall()
         return [self._lore_entry_from_row(row) for row in rows]
 
     def get_lore_entry(self, lore_id: str) -> dict | None:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM lore_entries WHERE id = ?", (lore_id,)).fetchone()
+            row = connection.execute("SELECT * FROM lore_entries WHERE id = %s AND workspace_id = \'default\'", (lore_id,)).fetchone()
         return None if row is None else self._lore_entry_from_row(row)
 
     def create_lore_entry(self, project_id: str, payload: dict) -> dict | None:
@@ -601,8 +601,8 @@ class MovieRepository:
                     constant, selective_logic, probability, case_sensitive, priority,
                     scan_depth, match_whole_words, group_name, group_weight, prevent_recursion,
                     delay_until_recursion, character_filter_json, automation_id, role, extensions_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, workspace_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
                 """,
                 (
                     lore_id,
@@ -635,13 +635,13 @@ class MovieRepository:
                     now,
                 ),
             )
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, project_id))
         return self.get_lore_entry(lore_id)
 
     def replace_lore_entries(self, project_id: str, entries: list[dict]) -> list[dict]:
         now = utc_now_iso()
         with self.database.connect() as connection:
-            connection.execute("DELETE FROM lore_entries WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM lore_entries WHERE project_id = %s AND workspace_id = \'default\'", (project_id,))
             for item in entries:
                 lore_id = str(uuid.uuid4())
                 connection.execute(
@@ -652,8 +652,8 @@ class MovieRepository:
                         constant, selective_logic, probability, case_sensitive, priority,
                         scan_depth, match_whole_words, group_name, group_weight, prevent_recursion,
                         delay_until_recursion, character_filter_json, automation_id, role, extensions_json,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, workspace_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
                     """,
                     (
                         lore_id,
@@ -686,7 +686,7 @@ class MovieRepository:
                         now,
                     ),
                 )
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, project_id))
         return self.list_lore_entries(project_id)
 
     def update_lore_entry(self, lore_id: str, updates: dict) -> dict | None:
@@ -731,34 +731,34 @@ class MovieRepository:
         assignments = []
         values: list[object] = []
         for key, value in clean.items():
-            assignments.append(f"{key} = ?")
+            assignments.append(f"{key} = %s")
             values.append(value)
         now = utc_now_iso()
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         values.append(lore_id)
 
         with self.database.connect() as connection:
-            row = connection.execute("SELECT project_id FROM lore_entries WHERE id = ?", (lore_id,)).fetchone()
+            row = connection.execute("SELECT project_id FROM lore_entries WHERE id = %s AND workspace_id = \'default\'", (lore_id,)).fetchone()
             if row is None:
                 return None
-            connection.execute(f"UPDATE lore_entries SET {', '.join(assignments)} WHERE id = ?", values)
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, row["project_id"]))
+            connection.execute(f"UPDATE lore_entries SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'", values)
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, row["project_id"]))
         return self.get_lore_entry(lore_id)
 
     def delete_lore_entry(self, lore_id: str) -> bool:
         now = utc_now_iso()
         with self.database.connect() as connection:
-            row = connection.execute("SELECT project_id FROM lore_entries WHERE id = ?", (lore_id,)).fetchone()
+            row = connection.execute("SELECT project_id FROM lore_entries WHERE id = %s AND workspace_id = \'default\'", (lore_id,)).fetchone()
             if row is None:
                 return False
-            connection.execute("DELETE FROM lore_entries WHERE id = ?", (lore_id,))
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, row["project_id"]))
+            connection.execute("DELETE FROM lore_entries WHERE id = %s AND workspace_id = \'default\'", (lore_id,))
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, row["project_id"]))
         return True
 
     def get_user_profile(self, project_id: str) -> dict:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM user_profiles WHERE project_id = ?", (project_id,)).fetchone()
+            row = connection.execute("SELECT * FROM user_profiles WHERE project_id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
             if row is None:
                 now = utc_now_iso()
                 connection.execute(
@@ -768,12 +768,12 @@ class MovieRepository:
                         first_message, tags_json, persona_note, persona_note_depth, persona_note_role,
                         appearance_summary, booru_character_name,
                         booru_copyright, avatar_relative_path, portrait_relative_path,
-                        cowboy_shot_relative_path, fullbody_shot_relative_path, created_at, updated_at
-                    ) VALUES (?, ?, '', '', '', '', '', '[]', '', 4, 'system', '', '', '', NULL, NULL, NULL, NULL, ?, ?)
+                        cowboy_shot_relative_path, fullbody_shot_relative_path, created_at, updated_at, workspace_id
+                    ) VALUES (%s, %s, '', '', '', '', '', '[]', '', 4, 'system', '', '', '', NULL, NULL, NULL, NULL, %s, %s, 'default')
                     """,
                     (project_id, "User", now, now),
                 )
-                row = connection.execute("SELECT * FROM user_profiles WHERE project_id = ?", (project_id,)).fetchone()
+                row = connection.execute("SELECT * FROM user_profiles WHERE project_id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
         return self._user_profile_from_row(row)
 
     def update_user_profile(self, project_id: str, updates: dict) -> dict:
@@ -786,7 +786,7 @@ class MovieRepository:
             clean["persona_note_role"] = _normalize_message_role(clean["persona_note_role"], "system")
 
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM user_profiles WHERE project_id = ?", (project_id,)).fetchone()
+            row = connection.execute("SELECT * FROM user_profiles WHERE project_id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
             if row is None:
                 now = utc_now_iso()
                 connection.execute(
@@ -796,8 +796,8 @@ class MovieRepository:
                         first_message, tags_json, persona_note, persona_note_depth, persona_note_role,
                         appearance_summary, booru_character_name,
                         booru_copyright, avatar_relative_path, portrait_relative_path,
-                        cowboy_shot_relative_path, fullbody_shot_relative_path, created_at, updated_at
-                    ) VALUES (?, ?, '', '', '', '', '', '[]', '', 4, 'system', '', '', '', NULL, NULL, NULL, NULL, ?, ?)
+                        cowboy_shot_relative_path, fullbody_shot_relative_path, created_at, updated_at, workspace_id
+                    ) VALUES (%s, %s, '', '', '', '', '', '[]', '', 4, 'system', '', '', '', NULL, NULL, NULL, NULL, %s, %s, 'default')
                     """,
                     (project_id, "User", now, now),
                 )
@@ -805,15 +805,15 @@ class MovieRepository:
                 assignments = []
                 values: list[object] = []
                 for key, value in clean.items():
-                    assignments.append(f"{key} = ?")
+                    assignments.append(f"{key} = %s")
                     values.append(value)
                 now = utc_now_iso()
-                assignments.append("updated_at = ?")
+                assignments.append("updated_at = %s")
                 values.append(now)
                 values.append(project_id)
-                connection.execute(f"UPDATE user_profiles SET {', '.join(assignments)} WHERE project_id = ?", values)
-                connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
-            row = connection.execute("SELECT * FROM user_profiles WHERE project_id = ?", (project_id,)).fetchone()
+                connection.execute(f"UPDATE user_profiles SET {', '.join(assignments)} WHERE project_id = %s AND workspace_id = \'default\'", values)
+                connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, project_id))
+            row = connection.execute("SELECT * FROM user_profiles WHERE project_id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
         return self._user_profile_from_row(row)
 
     def add_image_candidate(
@@ -834,8 +834,8 @@ class MovieRepository:
                 """
                 INSERT INTO image_candidates (
                     id, project_id, owner_type, owner_id, image_slot,
-                    relative_path, prompt_text, negative_prompt, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    relative_path, prompt_text, negative_prompt, created_at, workspace_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
                 """,
                 (
                     candidate_id,
@@ -849,8 +849,8 @@ class MovieRepository:
                     now,
                 ),
             )
-            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
-            row = connection.execute("SELECT * FROM image_candidates WHERE id = ?", (candidate_id,)).fetchone()
+            connection.execute("UPDATE projects SET updated_at = %s WHERE id = %s AND workspace_id = \'default\'", (now, project_id))
+            row = connection.execute("SELECT * FROM image_candidates WHERE id = %s AND workspace_id = \'default\'", (candidate_id,)).fetchone()
         return self._image_candidate_from_row(row)
 
     def list_image_candidates(
@@ -862,16 +862,16 @@ class MovieRepository:
         image_slot: str | None = None,
         limit: int = 100,
     ) -> list[dict]:
-        where_parts = ["project_id = ?"]
+        where_parts = ["project_id = %s"]
         values: list[object] = [project_id]
         if owner_type:
-            where_parts.append("owner_type = ?")
+            where_parts.append("owner_type = %s")
             values.append(owner_type)
         if owner_id:
-            where_parts.append("owner_id = ?")
+            where_parts.append("owner_id = %s")
             values.append(owner_id)
         if image_slot:
-            where_parts.append("image_slot = ?")
+            where_parts.append("image_slot = %s")
             values.append(image_slot)
         values.append(max(1, int(limit)))
         with self.database.connect() as connection:
@@ -880,7 +880,7 @@ class MovieRepository:
                 SELECT * FROM image_candidates
                 WHERE {' AND '.join(where_parts)}
                 ORDER BY created_at DESC
-                LIMIT ?
+                LIMIT %s
                 """,
                 values,
             ).fetchall()
@@ -888,7 +888,7 @@ class MovieRepository:
 
     def get_image_candidate(self, candidate_id: str) -> dict | None:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM image_candidates WHERE id = ?", (candidate_id,)).fetchone()
+            row = connection.execute("SELECT * FROM image_candidates WHERE id = %s AND workspace_id = \'default\'", (candidate_id,)).fetchone()
         return None if row is None else self._image_candidate_from_row(row)
 
     def create_generation_run(self, project_id: str, task_type: str) -> dict:
@@ -899,8 +899,8 @@ class MovieRepository:
                 """
                 INSERT INTO generation_runs (
                     id, project_id, task_type, status, progress, error_text,
-                    created_at, updated_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, completed_at, workspace_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'default')
                 """,
                 (run_id, project_id, task_type, "queued", 0.0, None, now, now, None),
             )
@@ -918,30 +918,30 @@ class MovieRepository:
         assignments = []
         values: list[object] = []
         if status is not None:
-            assignments.append("status = ?")
+            assignments.append("status = %s")
             values.append(status)
         if progress is not None:
-            assignments.append("progress = ?")
+            assignments.append("progress = %s")
             values.append(progress)
-        assignments.append("error_text = ?")
+        assignments.append("error_text = %s")
         values.append(error_text)
         now = utc_now_iso()
-        assignments.append("updated_at = ?")
+        assignments.append("updated_at = %s")
         values.append(now)
         if completed:
-            assignments.append("completed_at = ?")
+            assignments.append("completed_at = %s")
             values.append(now)
         values.append(run_id)
 
         with self.database.connect() as connection:
-            cursor = connection.execute(f"UPDATE generation_runs SET {', '.join(assignments)} WHERE id = ?", values)
+            cursor = connection.execute(f"UPDATE generation_runs SET {', '.join(assignments)} WHERE id = %s AND workspace_id = \'default\'", values)
             if cursor.rowcount == 0:
                 return None
         return self.get_generation_run(run_id)
 
     def get_generation_run(self, run_id: str) -> dict | None:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM generation_runs WHERE id = ?", (run_id,)).fetchone()
+            row = connection.execute("SELECT * FROM generation_runs WHERE id = %s AND workspace_id = \'default\'", (run_id,)).fetchone()
         return None if row is None else self._generation_run_from_row(row)
 
     def get_model_settings(self) -> dict:
@@ -949,7 +949,7 @@ class MovieRepository:
         defaults = build_default_model_settings(self.settings, legacy_runtime)
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT value_text FROM app_settings WHERE key = ?",
+                "SELECT value_text FROM app_settings WHERE key = %s AND workspace_id = \'default\'",
                 (self.MODEL_SETTINGS_KEY,),
             ).fetchone()
         raw_settings = _loads(row["value_text"] if row else None, {})
@@ -970,7 +970,7 @@ class MovieRepository:
     def get_media_generation_settings(self) -> dict:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT value_text FROM app_settings WHERE key = ?",
+                "SELECT value_text FROM app_settings WHERE key = %s AND workspace_id = \'default\'",
                 (self.MEDIA_SETTINGS_KEY,),
             ).fetchone()
         raw_settings = _loads(row["value_text"] if row else None, {})
@@ -986,7 +986,7 @@ class MovieRepository:
 
     def get_project_model_settings_override(self, project_id: str) -> dict | None:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT model_settings_override_json FROM projects WHERE id = ?", (project_id,)).fetchone()
+            row = connection.execute("SELECT model_settings_override_json FROM projects WHERE id = %s AND workspace_id = \'default\'", (project_id,)).fetchone()
         if row is None:
             return None
         return normalize_project_model_settings_override(_loads(row["model_settings_override_json"], {}))
@@ -998,8 +998,8 @@ class MovieRepository:
             cursor = connection.execute(
                 """
                 UPDATE projects
-                SET model_settings_override_json = ?, updated_at = ?
-                WHERE id = ?
+                SET model_settings_override_json = %s, updated_at = %s
+                WHERE id = %s AND workspace_id = \'default\'
                 """,
                 (json.dumps(payload), now, project_id),
             )
@@ -1059,7 +1059,7 @@ class MovieRepository:
     def _get_legacy_assistant_settings_from_store(self) -> dict:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT key, value_text FROM app_settings WHERE key IN (?, ?, ?, ?, ?)",
+                "SELECT key, value_text FROM app_settings WHERE key IN (%s, %s, %s, %s, %s)",
                 tuple(self.ASSISTANT_SETTING_KEYS.values()),
             ).fetchall()
         stored = {row["key"]: row["value_text"] for row in rows}
@@ -1078,8 +1078,8 @@ class MovieRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO app_settings (key, value_text, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO app_settings (key, value_text, updated_at, workspace_id)
+                VALUES (%s, %s, %s, \'default\')
                 ON CONFLICT(key) DO UPDATE SET
                     value_text = excluded.value_text,
                     updated_at = excluded.updated_at

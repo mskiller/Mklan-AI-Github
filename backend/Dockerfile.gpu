@@ -33,6 +33,9 @@ RUN if [ "$INSTALL_SD_SCRIPTS" = "true" ]; then \
 
 # Copy application code
 COPY app/ ./app/
+COPY alembic.ini ./alembic.ini
+COPY alembic/ ./alembic/
+COPY migrations/ ./migrations/
 
 # Default environment variables
 ENV PYTHONPATH=/app

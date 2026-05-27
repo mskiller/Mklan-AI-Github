@@ -1,0 +1,156 @@
+# Mklan Studio — v2 Upgrade Plan
+
+This document outlines the seven targeted upgrades for the **Mklan Studio v2** release, ranked by systemic impact. It serves as the official roadmap, mapping architectural changes, execution rationale, and cross-module implications across three rolling delivery phases.
+
+---
+
+## Technical Overview & Stack Additions
+
+To support the v2 features without breaking existing local deployment ergonomics, the following software components will join the stack:
+
+* **Data & State:** PostgreSQL + `pgvector` (Unified Core) · Redis · SQLModel + Alembic
+* **Asynchronous Tasks & Events:** ARQ (Async Redis Queue) · Server-Sent Events (SSE) / WebSockets
+* **AI Integration & Sidecars:** SimpleTuner / Kohya-ss (Flux Branch) · Florence-2 (Local Sidecar) · Wan2.1/CogVideoX API Endpoints
+
+---
+
+## Core Upgrades Matrix
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            CORE INFRASTRUCTURE                              │
+├──────────────────────────────────────┬──────────────────────────────────────┤
+│ 1. Async Job Queue & Real-Time Stream│ 2. PostgreSQL Core Backend Migration │
+│    - Replaces SQLite-backed polling  │    - Consolidates isolated files     │
+│    - ARQ + Redis broker backend      │    - pgvector similarity & FTS        │
+└──────────────────────────────────────┴──────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            GENERATION ENGINE                                │
+├──────────────────────────────────────┬──────────────────────────────────────┤
+│ 3. ComfyUI Template Workflow Engine  │ 4. Flux + SDXL Pony Training Support │
+│    - Variable field configuration    │    - Multi-family model selectors    │
+│    - Read-only node inspector UI     │    - Dataset & caption specialization│
+└──────────────────────────────────────┴──────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              NEW CAPABILITIES                               │
+├──────────────────────────────────────┬──────────────────────────────────────┤
+│ 5. Native Video Generation Module    │ 6. Cross-Module AI Copilot Layer    │
+│    - Local diffusion (/video route)  │    - Context-aware sidebar panel     │
+│    - Pre-filled movie scene clips    │    - Local Florence-2 auto-captioning│
+└──────────────────────────────────────┴──────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                UX & DEVEX                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 7. Multi-Project Workspace Profiles                                         │
+│    - Isolated scopes via workspace_id foreign keys                          │
+│    - Global asset pool filtering with quick-switch navigation                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+```
+
+---
+
+## Targeted Upgrade Specifications
+
+### 1. Async Job Queue with WebSocket/SSE Progress
+
+* **The Problem:** Long-running operations (LoRA training runs, gallery scans, caption generation jobs, and image creation workflows) rely on a custom, local SQLite-backed job manager. Frontends must repeatedly poll this table, causing noisy HTTP traffic, out-of-sync UI states, and a brittle framework for cross-module job pipelines.
+* **The v2 Approach:** Introduce **ARQ** (Async Redis Queue) or **Celery + Redis** as a centralized task broker. Every processing routine becomes an independent async worker task. The frontend drops polling in favor of subscribing to a **Server-Sent Events (SSE)** stream or a lightweight WebSocket channel to get live progress, real-time log tailing, and instant completion hooks.
+* **Key Benefits:** Implements standard retries, priority task queues, dead-letter handling, and unified cross-module dashboarding natively. Redis shares infrastructure next to Postgres inside `docker-compose.yml`, requiring only a single additional service entry.
+* **Affected Modules & Directories:** `Training module`, `Generation module`, `Gallery scans`, `Dashboard UI`, and the new `Redis service`.
+
+### 2. PostgreSQL Migration for Core Backend Data
+
+* **The Problem:** Core app configurations, wildcards, movie scripts, characters/cards, and training metadata reside in segregated SQLite files. This blocks concurrent operations due to database locking, prevents system-wide full-text searching (FTS) beyond primitive FTS5, and fragments vector lookups. While the Media Indexer uses Postgres and `pgvector`, it remains completely isolated inside the Gallery module.
+* **The v2 Approach:** Migrated all FastAPI database models to Postgres using **SQLModel + Alembic** migration schemas. Core database elements will live in a single unified schema segmented via per-module namespaces (prefixed tables or logical schemas). This unlocks complex, cross-domain full-text searching and enables `pgvector` similarity lookups across all asset types (e.g., "Find wildcards/cards matching this image prompt style").
+* **Migration Strategy:** A dedicated, automated migration script will be built on top of the current `backend/migrations/` structure. SQLite storage configurations will remain intact behind a fallback feature flag for initial testing stability.
+* **Affected Modules & Directories:** `Wildcards`, `Movie Script`, `Cards`, `Training`, and `Gallery (Unified)`.
+
+### 3. Full ComfyUI Workflow Engine
+
+* **The Problem:** The Generation module dispatches fixed, hardcoded node graphs via simple ComfyUI-compatible endpoints. Advanced generation requirements—like specified ControlNet poses, IP-Adapter style sheets, or multi-step High-Res Fix procedures—force creators to leave Mklan Studio entirely to interact directly with the native ComfyUI panel.
+* **The v2 Approach:** Construct a native **Workflow Template Library** inside Studio. JSON templates formatted in the ComfyUI API syntax will be stored inside `data/integrations/comfyui/`. The UI will allow users to pick a workflow structure (such as txt2img, img2img, ControlNet openpose, or multi-stage upscale) and configure variables exposed via schema parsing (prompts, weights, seeds, checkpoints). A WebSocket listener will forward ComfyUI's native event blocks directly into the real-time job queue built in Upgrade #1.
+* **Visual Enhancements:** Implement a read-only visual node inspector onto the generation layout. This does not serve as a full node editor, but provides transparency over what operations are occurring inside the pipeline.
+* **Affected Modules & Directories:** `Generation module`, `Movie module (scene image/video workflows)`, `ComfyUI integration wrapper`, and `data/integrations/comfyui/`.
+
+### 4. Flux + SDXL Pony Training Support
+
+* **The Problem:** The core Training module is tightly bound to SDXL LoRA parameters running through Kohya-ss. As local diffusion models shift towards Flux-centric architectures, the older caption structures (tag-heavy, Danbooru styles) and strict dataset requirements present blockers for creators moving to newer foundational checkpoints.
+* **The v2 Approach:** Embed an explicit **Model Family Selector** at the top level of the training layout (supporting SD 1.5, SDXL, SDXL Pony, and Flux.1). Toggling the target model family automatically adjusts backend defaults: swapping the container runtime (`Dockerfile.gpu` vs **SimpleTuner** / Kohya Flux pipelines), updating resolution targets, altering batch optimizations, and transforming caption paradigms.
+* **Data Modifications:** Subfolders will be allocated under `data/models/images/Flux/` running alongside the existing `Base/` structures. Caption processors will offer a distinct natural-language generation mode specifically tailored for Flux training requirements.
+* **Affected Modules & Directories:** `Training module`, `Caption scanner`, `Model inventory`, `App Settings`, and `GPU Dockerfile configurations`.
+
+### 5. Video Generation Module
+
+* **The Opportunity:** The file tree provides an unused directory hook under `data/models/video/`. Local video diffusion options (Wan2.1, CogVideoX-5B, AnimateDiff) can now operate efficiently on consumer hardware, and the Movie Script engine is already writing localized video prompts per scene without an automated pipeline to process them.
+* **The v2 Approach:** Introduce a primary **`/video`** application route. The module will deliver Text-to-Video generation using an integrated model selector, Image-to-Video generation (utilizing uploads or source media curated directly from the Gallery), timeline length toggles, and an iterative asset browser querying `data/generated/video/`. The backend operations will route directly through ComfyUI custom nodes (such as Wan or AnimateDiff pipelines via Upgrade #3) or direct api instances configurable through the settings deck.
+* **Movie Integration:** Scene layout cards inside the Movie module will generate a "Generate video clip" contextual prompt button. Selecting this will open the `/video` interface with characters, styles, and prompt parameters pre-filled from the script details.
+* **Affected Modules & Directories:** `New /video route UI`, `Movie module`, `Gallery indexing`, `data/models/video/`, and `data/generated/video/`.
+
+### 6. Cross-Module AI Copilot Layer
+
+* **The Problem:** System LLM configurations remain highly isolated. The Generation chat interface cannot read or modify files from the Wildcard panel, and the Scenario Assistant inside the Movie workspace remains locked away from dataset validation tools. The local LLM orchestration engine exists, but it lacks application-wide accessibility.
+* **The v2 Approach:** Standardize a collapsible **Copilot Sidebar** globally visible across all active panels. The system will dynamically inject context based on the user's active view:
+* *Wildcard Panel:* Feeds active category schemas and adjacent tokens to generate iterative variations.
+* *Training Panel:* Injects current image elements alongside target styling rules to modify, improve, or format captions.
+* *Movie Panel:* Extracts scene beats to smoothly generate script transitions or dialog suggestions.
+
+
+* **Local Automations:** Incorporate a local **Florence-2** / BLIP-2 sidecar deployment inside the container ecosystem. This enables hardware-accelerated local caption generations to be processed on-demand inside the dataset UI without pulling remote commercial APIs.
+* **Affected Modules & Directories:** `Global application views`, `Training (Auto-captioning UI)`, `Wildcards view`, `Movie Script interface`, and the new `Florence-2 container sidecar`.
+
+### 7. Multi-Project Workspace Profiles
+
+* **The Problem:** Project structures are completely flat underneath the standard `data/` volume mount. Working on separate tasks simultaneously (e.g., a high-fantasy card pack, a sci-fi screen narrative, and a corporate portrait LoRA dataset) forces files, prompts, card vaults, and wildcard libraries to co-mingle, relying entirely on custom naming structures to prevent collisions.
+* **The v2 Approach:** Introduce a foundational, non-authenticated **Workspace Profile** paradigm. Profiles will be stored as rows inside the newly migrated Postgres core backend database. Activating an active workspace filters and scopes all operational data fields. Selecting a project dynamically swaps visible wildcards, context vaults, script definitions, target model weights, and generation templates.
+* **Data Strategy:** Global galleries and raw assets remain shared across the system to optimize disc space, but are scoped via metadata tracking tags. Core tables will ingest a `workspace_id` foreign key constraint to maintain strict relational integrity. Users will be able to export or import complete workspace components via flat `.zip` packages for manual sharing or local backups.
+* **Affected Modules & Directories:** `Global workspace views`, `Settings panel`, `Top Navigation controls`, `data/ filesystem layout`, and `Postgres schemas`.
+
+---
+
+## Phased Delivery Roadmap
+
+```
+PHASE 1: FOUNDATION          PHASE 2: ENGINE              PHASE 3: EXPANSION
+┌─────────────────────────┐  ┌─────────────────────────┐  ┌─────────────────────────┐
+│ • Redis + ARQ Engine    │  │ • ComfyUI Templates     │  │ • Video Gen Module      │
+│ • SSE / WS Messaging    │──▶ • Flux Training Stack   │──▶ • Florence-2 Auto-Cap     │
+│ • Postgres Core Migr.   │  │ • Workspace Profiles    │  │ • Workspace Zip Export  │
+│ • pgvector Unified Search│ │ • Copilot Sidebar Alpha │  │ • Read-Only Node Inspect│
+└─────────────────────────┘  └─────────────────────────┘  └─────────────────────────┘
+
+```
+
+### Phase 1 — Foundation (Infrastructure & Data Integrity)
+
+Focuses entirely on re-architecting the backend communication loop and database schemas to eliminate locking and polling bottlenecks.
+
+* Deploy Redis backend service alongside Postgres in docker-compose configs.
+* Implement the **ARQ** job processing loop for background task handling.
+* Establish **Server-Sent Events (SSE)** and WebSocket connections for state handling.
+* Run the migration from flat SQLite structures to consolidated PostgreSQL schema profiles.
+* Expose unified `pgvector` lookups across the core application context.
+
+### Phase 2 — Engine (Generation Capabilities & Context Control)
+
+Expands generation possibilities and isolates operational contexts for power users.
+
+* Roll out the **ComfyUI Workflow Template Library** inside `data/integrations/comfyui/`.
+* Integrate **SimpleTuner** / Kohya Flux training profiles along with the Model Family selector toggle.
+* Apply the `workspace_id` database relationships across core tables to launch **Workspace Profiles**.
+* Deploy the introductory alpha release of the global context-aware **Copilot Sidebar**.
+
+### Phase 3 — Expansion (New Mediums & Visual Overviews)
+
+Brings new media format processing pipelines online and refines user experience modules.
+
+* Launch the dedicated **`/video`** generation route with native script generation hooks.
+* Spin up the local hardware-accelerated **Florence-2 container sidecar** for immediate dataset caption generation.
+* Package the binary importer/exporter tooling for moving workspace profiles as flat `.zip` modules.
+* Activate the read-only visual node architecture overlay inside the ComfyUI workflow dispatcher.

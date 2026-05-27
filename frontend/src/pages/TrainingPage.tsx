@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   Brain,
@@ -21,21 +21,23 @@ import {
   Upload,
   Wand2,
 } from 'lucide-react';
+import { useJobEvents } from '../hooks/useJobEvents';
 
 const API = '/api/training';
-const JOB_API = '/api/jobs';
 const terminalStatuses = new Set(['succeeded', 'failed', 'canceled']);
 
 type TrainingTab = 'dataset' | 'review' | 'captionScan' | 'settings' | 'runs' | 'artifacts';
-type TrainingPreset = 'sdxl_lora' | 'sdxl_finetune' | 'anima_lora' | 'z_image_lora';
+type ModelFamily = 'sd15' | 'sdxl' | 'sdxl_pony' | 'flux';
+type TrainingPreset = 'sd15_lora' | 'sdxl_lora' | 'sdxl_pony_lora' | 'sdxl_finetune' | 'flux_lora' | 'anima_lora' | 'z_image_lora';
 type LoraType = 'lora' | 'locon' | 'loha' | 'lokr';
 type MixedPrecision = 'auto' | 'bf16' | 'fp16' | 'no';
-type CaptionProvider = 'auto' | 'local_blip' | 'koboldcpp_vlm' | 'clip_tagger' | 'filename_fallback';
+type CaptionProvider = 'auto' | 'local_blip' | 'koboldcpp_vlm' | 'clip_tagger' | 'florence2' | 'filename_fallback';
+type CaptionStyle = 'sdxl_tags' | 'pony_tags' | 'natural_language';
 
 interface CaptionModelRead {
   id: string;
   label: string;
-  provider: 'local_blip' | 'clip_tagger';
+  provider: 'local_blip' | 'clip_tagger' | 'florence2';
   path: string;
   local: boolean;
   source: string;
@@ -46,10 +48,23 @@ interface TrainingModelFile {
   path: string;
   size: number;
   kind: 'base' | 'vae';
+  family: string;
   modified_at: string;
 }
 
+interface TrainingFamily {
+  id: ModelFamily;
+  label: string;
+  default_preset: TrainingPreset;
+  model_root: string;
+  resolution: number;
+  caption_style: CaptionStyle;
+  trainer: string;
+  notes: string;
+}
+
 interface TrainingModelFilesResponse {
+  families: TrainingFamily[];
   base_models: TrainingModelFile[];
   vae_models: TrainingModelFile[];
   dry_run_forced: boolean;
@@ -146,11 +161,13 @@ interface CaptionScanResult {
   model_count?: number;
   vlm_count?: number;
   clip_count?: number;
+  florence_count?: number;
   provider?: CaptionProvider;
   local_model_id?: string | null;
   clip_model_id?: string | null;
   model_used?: string | null;
   download_allowed?: boolean;
+  caption_style?: CaptionStyle;
   caption_sources?: Record<string, number>;
   errors?: Array<{ filename?: string; error?: string }>;
 }
@@ -183,6 +200,13 @@ function formatBytes(bytes: number) {
 
 function formatPercent(value: number) {
   return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
+}
+
+function numericInputOrDefault(value: string, fallback: number) {
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : fallback;
 }
 
 function captionStartsWithTrigger(caption: string, triggerWord: string) {
@@ -219,8 +243,11 @@ const tabConfig: Array<{ id: TrainingTab; label: string; icon: typeof Brain }> =
 ];
 
 const presetDescriptions: Record<TrainingPreset, string> = {
+  sd15_lora: 'Classic SD 1.5 LoRA through kohya sd-scripts.',
   sdxl_lora: 'Complete local SDXL LoRA path through kohya sd-scripts.',
+  sdxl_pony_lora: 'Pony-flavored SDXL LoRA with tag-first caption defaults.',
   sdxl_finetune: 'Advanced SDXL checkpoint fine-tune with conservative warnings.',
+  flux_lora: 'Guarded Flux LoRA command path for SimpleTuner-compatible trainers.',
   anima_lora: 'Guarded Anima LoRA adapter requiring DiT, text encoder, and VAE paths.',
   z_image_lora: 'Guarded Z-Image adapter slot requiring an explicit local train script.',
 };
@@ -230,13 +257,21 @@ const captionProviderLabels: Record<CaptionProvider, string> = {
   local_blip: 'Local BLIP',
   koboldcpp_vlm: 'KoboldCPP/vLLM',
   clip_tagger: 'CLIP tagger',
+  florence2: 'Florence-2',
   filename_fallback: 'Filename fallback',
+};
+
+const captionStyleLabels: Record<CaptionStyle, string> = {
+  sdxl_tags: 'SDXL tags',
+  pony_tags: 'Pony tags',
+  natural_language: 'Natural language',
 };
 
 const captionSourceLabels: Record<string, string> = {
   local_blip: 'Local BLIP',
   koboldcpp_vlm: 'KoboldCPP/vLLM',
   clip_tagger: 'CLIP tagger',
+  florence2: 'Florence-2',
   filename_fallback: 'Filename fallback',
   skipped_existing: 'Skipped existing',
 };
@@ -294,10 +329,13 @@ export function TrainingPage() {
   const [captionScanMaxWords, setCaptionScanMaxWords] = useState(40);
   const [captionScanOverwrite, setCaptionScanOverwrite] = useState(false);
   const [captionScanProvider, setCaptionScanProvider] = useState<CaptionProvider>('auto');
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('sdxl_tags');
   const [captionLocalModelId, setCaptionLocalModelId] = useState('');
   const [captionClipModelId, setCaptionClipModelId] = useState('OysterQAQ/DanbooruCLIP');
   const [captionScanJob, setCaptionScanJob] = useState<JobRead | null>(null);
+  const processedTerminalJobs = useRef(new Set<string>());
 
+  const [modelFamily, setModelFamily] = useState<ModelFamily>('sdxl');
   const [preset, setPreset] = useState<TrainingPreset>('sdxl_lora');
   const [outputName, setOutputName] = useState('mklan-sdxl-lora');
   const [baseModel, setBaseModel] = useState('');
@@ -386,33 +424,36 @@ export function TrainingPage() {
     void refreshDatasetItems().catch((err: Error) => setError(err.message));
   }, [refreshDatasetItems]);
 
-  useEffect(() => {
-    if (!currentJob || terminalStatuses.has(currentJob.status)) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const job = await readJson<JobRead>(`${JOB_API}/${currentJob.id}`);
-        setCurrentJob(job);
-        setRuns((current) => [job, ...current.filter((item) => item.id !== job.id)]);
-        if (terminalStatuses.has(job.status)) {
-          await refresh();
-          if (job.job_type === 'training.caption_scan') {
-            setCaptionScanJob(job);
-            const jobDatasetId = typeof job.payload?.dataset_id === 'string' ? job.payload.dataset_id : selectedDatasetId;
-            if (jobDatasetId) {
-              setSelectedDatasetId(jobDatasetId);
-              await refreshDatasetItems(jobDatasetId, selectedItemFilename);
-            }
-            setActiveTab(job.status === 'succeeded' ? 'review' : 'runs');
-          } else {
-            setActiveTab(job.status === 'succeeded' ? 'artifacts' : 'runs');
-          }
+  const handleLiveJob = useCallback((job: JobRead) => {
+    setCurrentJob(job);
+    setRuns((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+    if (!terminalStatuses.has(job.status) || processedTerminalJobs.current.has(job.id)) {
+      return;
+    }
+    processedTerminalJobs.current.add(job.id);
+    void (async () => {
+      await refresh();
+      if (job.job_type === 'training.caption_scan') {
+        setCaptionScanJob(job);
+        const jobDatasetId = typeof job.payload?.dataset_id === 'string' ? job.payload.dataset_id : selectedDatasetId;
+        if (jobDatasetId) {
+          setSelectedDatasetId(jobDatasetId);
+          await refreshDatasetItems(jobDatasetId, selectedItemFilename);
         }
-      } catch (err: any) {
-        setError(err.message);
+        setActiveTab(job.status === 'succeeded' ? 'review' : 'runs');
+      } else {
+        setActiveTab(job.status === 'succeeded' ? 'artifacts' : 'runs');
       }
-    }, 1600);
-    return () => window.clearInterval(timer);
-  }, [currentJob, refresh, refreshDatasetItems, selectedDatasetId, selectedItemFilename]);
+    })().catch((err: Error) => setError(err.message));
+  }, [refresh, refreshDatasetItems, selectedDatasetId, selectedItemFilename]);
+  const handleLiveJobError = useCallback((err: Error) => setError(err.message), []);
+
+  useJobEvents(currentJob?.id, {
+    enabled: Boolean(currentJob && !terminalStatuses.has(currentJob.status)),
+    onJob: handleLiveJob,
+    onError: handleLiveJobError,
+    pollIntervalMs: 1600,
+  });
 
   const selectedDataset = datasets.find((item) => item.id === selectedDatasetId) || null;
   const selectedDatasetItem = datasetItems.find((item) => item.filename === selectedItemFilename) || null;
@@ -432,6 +473,15 @@ export function TrainingPage() {
   const calculatedSteps = Math.max(1, Math.ceil(((selectedDataset?.image_count || datasetItems.length || 1) * numRepeats * epochs) / 1));
   const baseModelFiles = trainingModelFiles?.base_models || [];
   const vaeModelFiles = trainingModelFiles?.vae_models || [];
+  const trainingFamilies = trainingModelFiles?.families || [];
+  const activeFamily = trainingFamilies.find((family) => family.id === modelFamily) || trainingFamilies.find((family) => family.id === 'sdxl') || null;
+  const familyBaseModelFiles = useMemo(
+    () => {
+      const filtered = baseModelFiles.filter((item) => item.family === modelFamily || item.family === 'local');
+      return filtered.length ? filtered : baseModelFiles;
+    },
+    [baseModelFiles, modelFamily],
+  );
   const queuedRuns = runs.filter((run) => run.status === 'queued').length;
   const activeRuns = runs.filter((run) => run.status === 'running').length;
 
@@ -452,8 +502,44 @@ export function TrainingPage() {
     }
   }, [calculatedSteps, stepsEdited]);
 
+  useEffect(() => {
+    setBaseModel((current) => (current && familyBaseModelFiles.some((model) => model.path === current) ? current : familyBaseModelFiles[0]?.path || current));
+  }, [familyBaseModelFiles]);
+
+  const applyFamilyDefaults = (familyId: ModelFamily, nextPreset?: TrainingPreset) => {
+    const family = trainingFamilies.find((item) => item.id === familyId);
+    setModelFamily(familyId);
+    if (family) {
+      setPreset(nextPreset || family.default_preset);
+      setResolution(family.resolution);
+      setCaptionStyle(family.caption_style);
+      setOutputName((current) => current || `mklan-${familyId}-lora`);
+    }
+  };
+
+  const selectModelFamily = (familyId: ModelFamily) => {
+    applyFamilyDefaults(familyId);
+  };
+
+  const selectTrainingPreset = (nextPreset: TrainingPreset) => {
+    const presetFamily: Partial<Record<TrainingPreset, ModelFamily>> = {
+      sd15_lora: 'sd15',
+      sdxl_lora: 'sdxl',
+      sdxl_pony_lora: 'sdxl_pony',
+      sdxl_finetune: 'sdxl',
+      flux_lora: 'flux',
+    };
+    const familyId = presetFamily[nextPreset];
+    if (familyId) {
+      applyFamilyDefaults(familyId, nextPreset);
+      return;
+    }
+    setPreset(nextPreset);
+  };
+
   const runPayload = () => ({
     dataset_id: selectedDatasetId,
+    model_family: modelFamily,
     preset,
     output_name: outputName,
     base_model: baseModel,
@@ -469,15 +555,15 @@ export function TrainingPage() {
     keep_tokens: keepTokens,
     clip_skip: clipSkip,
     flip_aug: flipAug,
-    learning_rate: Number(unetLr) || 0.0001,
-    unet_lr: Number(unetLr) || 0.0005,
-    text_encoder_lr: Number(textEncoderLr) || 0.00005,
+    learning_rate: numericInputOrDefault(unetLr, 0.0001),
+    unet_lr: numericInputOrDefault(unetLr, 0.0005),
+    text_encoder_lr: numericInputOrDefault(textEncoderLr, 0.00005),
     lr_scheduler: lrScheduler,
     lr_scheduler_num_cycles: lrSchedulerCycles,
-    min_snr_gamma: Number(minSnrGamma) || 0,
+    min_snr_gamma: numericInputOrDefault(minSnrGamma, 0),
     network_dim: networkDim,
     network_alpha: networkAlpha,
-    noise_offset: Number(noiseOffset) || 0,
+    noise_offset: numericInputOrDefault(noiseOffset, 0),
     optimizer_type: optimizerType,
     mixed_precision: mixedPrecision,
     save_every_n_epochs: saveEveryNEpochs,
@@ -520,7 +606,7 @@ export function TrainingPage() {
       setDatasets((current) => [dataset, ...current]);
       selectDataset(dataset.id);
       setCaptionTriggerWord(triggerToken.trim());
-      setMessage('Dataset created with the current SDXL caption and bucket settings.');
+      setMessage('Dataset created with the current training caption and bucket settings.');
     } catch (err: any) {
       setError(err.message);
     }
@@ -647,6 +733,7 @@ export function TrainingPage() {
           prepend_trigger: true,
           trigger_word: captionTriggerWord.trim() || undefined,
           provider: captionScanProvider,
+          caption_style: captionStyle,
           local_model_id: captionLocalModelId || undefined,
           clip_model_id: captionClipModelId || undefined,
         }),
@@ -736,7 +823,7 @@ export function TrainingPage() {
       <div className="glass-panel" style={{ padding: '1rem', display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
         <div>
           <h1 className="text-gradient" style={{ fontSize: 'clamp(1.8rem, 3vw, 2.4rem)' }}>AI Training</h1>
-          <p style={{ color: 'var(--text-secondary)', margin: '0.2rem 0 0' }}>Build datasets, launch SDXL LoRA jobs, and collect trained model artifacts.</p>
+          <p style={{ color: 'var(--text-secondary)', margin: '0.2rem 0 0' }}>Build datasets, choose a model family, launch LoRA jobs, and collect trained model artifacts.</p>
         </div>
         <button onClick={() => void refresh()} style={{ border: '1px solid var(--border-color)' }}>
           <RefreshCw size={16} />
@@ -768,7 +855,7 @@ export function TrainingPage() {
               <label>Trigger token<input value={triggerToken} onChange={(event) => setTriggerToken(event.target.value)} /></label>
               <label>Class tokens<input value={classTokens} onChange={(event) => setClassTokens(event.target.value)} /></label>
             </div>
-            <button onClick={() => void createDataset()} className="primary-button"><Save size={16} /> Create SDXL Dataset</button>
+            <button onClick={() => void createDataset()} className="primary-button"><Save size={16} /> Create Dataset</button>
           </Section>
 
           <Section title="Dataset Files" icon={Upload}>
@@ -908,7 +995,8 @@ export function TrainingPage() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.65rem' }}>
               <label>Max words<input type="number" min={1} max={200} value={captionScanMaxWords} onChange={(event) => setCaptionScanMaxWords(Math.max(1, Number(event.target.value) || 1))} /></label>
               <label>Trigger word<input value={captionTriggerWord} onChange={(event) => setCaptionTriggerWord(event.target.value)} /></label>
-              <label>Provider<select value={captionScanProvider} onChange={(event) => setCaptionScanProvider(event.target.value as CaptionProvider)}><option value="auto">Auto</option><option value="local_blip">Local BLIP</option><option value="koboldcpp_vlm">KoboldCPP/vLLM</option><option value="clip_tagger">CLIP tagger</option><option value="filename_fallback">Filename fallback</option></select></label>
+              <label>Provider<select value={captionScanProvider} onChange={(event) => setCaptionScanProvider(event.target.value as CaptionProvider)}><option value="auto">Auto</option><option value="local_blip">Local BLIP</option><option value="koboldcpp_vlm">KoboldCPP/vLLM</option><option value="clip_tagger">CLIP tagger</option><option value="florence2">Florence-2</option><option value="filename_fallback">Filename fallback</option></select></label>
+              <label>Caption style<select value={captionStyle} onChange={(event) => setCaptionStyle(event.target.value as CaptionStyle)}><option value="sdxl_tags">SDXL tags</option><option value="pony_tags">Pony tags</option><option value="natural_language">Natural language</option></select></label>
             </div>
             {captionScanProvider === 'auto' || captionScanProvider === 'local_blip' ? (
               <label>BLIP model<select value={captionLocalModelId} onChange={(event) => setCaptionLocalModelId(event.target.value)}>
@@ -942,6 +1030,7 @@ export function TrainingPage() {
                 <div style={{ display: 'grid', gap: '0.35rem', fontSize: '0.86rem' }}>
                   <span>Max words: <strong style={{ color: 'var(--text-primary)' }}>{scanResult.max_words ?? captionScanMaxWords}</strong></span>
                   <span>Provider: <strong style={{ color: 'var(--text-primary)' }}>{captionProviderLabels[scanResult.provider || captionScanProvider]}</strong></span>
+                  <span>Caption style: <strong style={{ color: 'var(--text-primary)' }}>{captionStyleLabels[scanResult.caption_style || captionStyle]}</strong></span>
                   {scanResult.local_model_id || captionScanProvider === 'local_blip' ? <span>BLIP model: <strong style={{ color: 'var(--text-primary)' }}>{scanResult.local_model_id || captionLocalModelId || 'default'}</strong></span> : null}
                   {scanResult.clip_model_id || captionScanProvider === 'clip_tagger' ? <span>CLIP model: <strong style={{ color: 'var(--text-primary)' }}>{scanResult.clip_model_id || captionClipModelId}</strong></span> : null}
                   <span>Trigger added: <strong style={{ color: 'var(--text-primary)' }}>{scanResult.trigger_applied_count ?? 0}</strong>{scanResult.trigger_applied ? ` using ${captionTriggerWord || 'dataset trigger'}` : ''}</span>
@@ -972,10 +1061,34 @@ export function TrainingPage() {
 
       {activeTab === 'settings' ? (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))', gap: '1rem' }}>
+          <Section title="Model Family" icon={Cpu}>
+            <div style={{ display: 'grid', gap: '0.55rem' }}>
+              {(trainingFamilies.length ? trainingFamilies : [{ id: 'sdxl', label: 'SDXL', default_preset: 'sdxl_lora', model_root: 'Base', resolution: 1024, caption_style: 'sdxl_tags', trainer: 'kohya-ss sd-scripts', notes: 'Default SDXL LoRA path.' } as TrainingFamily]).map((family) => (
+                <button
+                  key={family.id}
+                  onClick={() => selectModelFamily(family.id)}
+                  className={modelFamily === family.id ? 'primary-button' : 'ghost-button'}
+                  style={{ justifyContent: 'flex-start', textAlign: 'left', minWidth: 0 }}
+                >
+                  <Cpu size={16} />
+                  <span style={{ minWidth: 0 }}>
+                    <strong>{family.label}</strong><br />
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', whiteSpace: 'normal' }}>{family.trainer} · {family.notes}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div style={{ border: '1px solid var(--border-color)', borderRadius: 8, padding: '0.65rem', color: 'var(--text-secondary)', display: 'grid', gap: '0.35rem' }}>
+              <span>Profile: <strong style={{ color: 'var(--text-primary)' }}>{activeFamily?.label || modelFamily}</strong></span>
+              <span>Caption style: <strong style={{ color: 'var(--text-primary)' }}>{captionStyleLabels[captionStyle]}</strong></span>
+              <span>Model root: <strong style={{ color: 'var(--text-primary)' }}>{activeFamily?.model_root || 'Base'}</strong></span>
+            </div>
+          </Section>
+
           <Section title="Training Preset" icon={Brain}>
             <div style={{ display: 'grid', gap: '0.55rem' }}>
               {(Object.keys(presetDescriptions) as TrainingPreset[]).map((item) => (
-                <button key={item} onClick={() => setPreset(item)} className={preset === item ? 'primary-button' : 'ghost-button'} style={{ justifyContent: 'flex-start', textAlign: 'left', minWidth: 0 }}>
+                <button key={item} onClick={() => selectTrainingPreset(item)} className={preset === item ? 'primary-button' : 'ghost-button'} style={{ justifyContent: 'flex-start', textAlign: 'left', minWidth: 0 }}>
                   <Brain size={16} />
                   <span style={{ minWidth: 0 }}><strong>{item.replace(/_/g, ' ')}</strong><br /><span style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', whiteSpace: 'normal' }}>{presetDescriptions[item]}</span></span>
                 </button>
@@ -986,7 +1099,7 @@ export function TrainingPage() {
           <Section title="Run Settings" icon={Cpu}>
             <label>Dataset<select value={selectedDatasetId} onChange={(event) => selectDataset(event.target.value)}><option value="">Select dataset</option>{datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label>
             <label>Output name<input value={outputName} onChange={(event) => setOutputName(event.target.value)} /></label>
-            <label>Base SDXL model<select value={baseModel} onChange={(event) => setBaseModel(event.target.value)}><option value="">Select base checkpoint</option>{baseModelFiles.map((model) => <option key={model.path} value={model.path}>{model.name} · {formatBytes(model.size)}</option>)}</select></label>
+            <label>Base model<select value={baseModel} onChange={(event) => setBaseModel(event.target.value)}><option value="">Select base checkpoint</option>{familyBaseModelFiles.map((model) => <option key={model.path} value={model.path}>{model.name} · {model.family} · {formatBytes(model.size)}</option>)}</select></label>
             <label>VAE<select value={vae} onChange={(event) => setVae(event.target.value)}><option value="">No VAE override</option>{vaeModelFiles.map((model) => <option key={model.path} value={model.path}>{model.name} · {formatBytes(model.size)}</option>)}</select></label>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.65rem' }}>
               <label>Epochs<input type="number" min={1} value={epochs} onChange={(event) => setEpochs(Number(event.target.value) || 1)} /></label>
@@ -1005,8 +1118,8 @@ export function TrainingPage() {
               <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><input type="checkbox" checked={flipAug} onChange={(event) => setFlipAug(event.target.checked)} style={{ width: 'auto' }} /> Flip Augmentation</label>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.65rem' }}>
-              <label>Unet LR<input value={unetLr} onChange={(event) => setUnetLr(event.target.value)} /></label>
-              <label>Text Encoder LR<input value={textEncoderLr} onChange={(event) => setTextEncoderLr(event.target.value)} /></label>
+              <label>Unet LR<input type="number" min={0} step="0.00001" value={unetLr} onChange={(event) => setUnetLr(event.target.value)} /></label>
+              <label>Text Encoder LR<input type="number" min={0} step="0.00001" value={textEncoderLr} onChange={(event) => setTextEncoderLr(event.target.value)} /></label>
               <label>LR Scheduler<select value={lrScheduler} onChange={(event) => setLrScheduler(event.target.value)}><option value="cosine">cosine</option><option value="constant">constant</option><option value="linear">linear</option><option value="polynomial">polynomial</option><option value="cosine_with_restarts">cosine with restarts</option></select></label>
               <label>LR Scheduler Cycles<input type="number" min={1} value={lrSchedulerCycles} onChange={(event) => setLrSchedulerCycles(Math.max(1, Number(event.target.value) || 1))} /></label>
               <label>Min SNR Gamma<input value={minSnrGamma} onChange={(event) => setMinSnrGamma(event.target.value)} /></label>
@@ -1023,7 +1136,13 @@ export function TrainingPage() {
                 <input value={animaVae} onChange={(event) => setAnimaVae(event.target.value)} placeholder="VAE path" />
               </div>
             ) : null}
-            {preset === 'z_image_lora' ? <input value={zTrainScript} onChange={(event) => setZTrainScript(event.target.value)} placeholder="Z-Image train script path" /> : null}
+            {preset === 'flux_lora' || preset === 'z_image_lora' ? (
+              <input
+                value={zTrainScript}
+                onChange={(event) => setZTrainScript(event.target.value)}
+                placeholder={preset === 'flux_lora' ? 'Flux/SimpleTuner train script path' : 'Z-Image train script path'}
+              />
+            ) : null}
             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} style={{ width: 'auto' }} /> Dry-run command/artifact</label>
             <div style={{ border: '1px solid var(--border-color)', borderRadius: 8, padding: '0.65rem', color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
               <span>Queue</span>

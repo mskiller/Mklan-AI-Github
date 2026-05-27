@@ -24,14 +24,17 @@ from .database import init_wildcard_db
 from .movie.database import Database as MovieDatabase
 from .studio_features import router as studio_router
 from .suggester import router as suggester_router
-from .generation import register_generation_jobs, router as generation_router
-from .training import register_training_jobs, router as training_router
+from .generation import router as generation_router
+from .training import router as training_router
+from .video import router as video_router
 from .cards.main import create_app as create_cards_app
-from .v2.assets import AssetRegistry, router as assets_router
-from .v2.audit import AuditLog
+from .v2.assets import router as assets_router
 from .v2.canon import router as canon_router
-from .v2.jobs import JobManager, router as jobs_router
-from .v2.workflows import register_workflow_jobs, router as workflows_router
+from .v2.copilot import router as copilot_router
+from .v2.jobs import router as jobs_router
+from .v2.runtime import create_platform_services
+from .v2.workflows import router as workflows_router
+from .v2.workspaces import router as workspaces_router
 
 
 def _default_data_root() -> Path:
@@ -55,11 +58,6 @@ generated_dir = data_path / "generated"
 generated_dir.mkdir(parents=True, exist_ok=True)
 
 
-async def _noop_job(job: dict, manager: JobManager) -> dict:
-    await manager.update_progress(job["id"], 0.5, "No-op job acknowledged.")
-    return {"ok": True, "echo": job["payload"]}
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: initialise both backends."""
@@ -75,15 +73,7 @@ async def lifespan(app: FastAPI):
     from .movie.init_state import init_movie_app_state
     init_movie_app_state(app, movie_db)
 
-    audit = AuditLog(data_path)
-    asset_registry = AssetRegistry(data_path)
-    asset_registry.initialize()
-    job_manager = JobManager(data_path)
-    job_manager.asset_registry = asset_registry
-    register_workflow_jobs(job_manager)
-    register_generation_jobs(job_manager)
-    register_training_jobs(job_manager)
-    job_manager.register_handler("system.noop", _noop_job)
+    audit, asset_registry, job_manager = create_platform_services(data_path)
 
     app.state.data_root = data_path
     app.state.v2_audit = audit
@@ -122,10 +112,13 @@ async def optional_studio_api_key_guard(request: Request, call_next):
         "/api/jobs",
         "/api/assets",
         "/api/workflows",
+        "/api/workspaces",
         "/api/canon",
+        "/api/copilot",
         "/api/studio",
         "/api/generation",
         "/api/training",
+        "/api/video",
     )
     if api_key and request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith(protected_prefixes):
         provided = request.headers.get("x-studio-api-key", "")
@@ -151,16 +144,19 @@ async def root_health():
     return {
         "status": "ok",
         "service": "mklan-studio",
-        "modules": ["wildcards", "movie", "cards", "training", "generation", "v2-jobs", "v2-assets", "v2-workflows", "v2-canon"],
+        "modules": ["wildcards", "movie", "cards", "training", "generation", "video", "v2-jobs", "v2-assets", "v2-workflows", "v2-workspaces", "v2-copilot", "v2-canon"],
     }
 
 app.include_router(studio_router, prefix="/api")
 app.include_router(generation_router, prefix="/api")
 app.include_router(training_router, prefix="/api")
+app.include_router(video_router, prefix="/api")
 app.include_router(suggester_router, prefix="/api/suggester")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(assets_router, prefix="/api")
 app.include_router(workflows_router, prefix="/api")
+app.include_router(workspaces_router, prefix="/api")
+app.include_router(copilot_router, prefix="/api")
 app.include_router(canon_router, prefix="/api")
 
 # Serve generated images statically at /generated

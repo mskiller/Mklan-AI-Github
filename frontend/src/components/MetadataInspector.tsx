@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Copy, FileJson, Info, ShieldAlert, Sparkles, Tag, Wand2 } from "lucide-react";
+import { Check, Copy, FileJson, Info, ShieldAlert, Sparkles, Tag, Wand2, ChevronDown, ChevronRight } from "lucide-react";
 
 interface InspectorMeta {
   prompt?: string;
@@ -117,10 +117,80 @@ function TextBox({ value, maxHeight = 180, compact = false }: { value?: string; 
   );
 }
 
+interface CollapsibleSectionProps {
+  title: string;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+  headerRight?: React.ReactNode;
+  borderColor?: string;
+}
+
+function CollapsibleSection({
+  title,
+  children,
+  defaultOpen = true,
+  headerRight,
+  borderColor,
+}: CollapsibleSectionProps) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  return (
+    <div
+      style={{
+        border: borderColor ? `1px solid ${borderColor}` : "1px solid var(--border-color)",
+        borderRadius: "8px",
+        background: "var(--bg-secondary)",
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        transition: "border-color 0.2s",
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0.65rem 0.85rem",
+          background: "rgba(255, 255, 255, 0.02)",
+          border: "none",
+          borderBottom: isOpen ? "1px solid var(--border-color)" : "none",
+          borderRadius: 0,
+          color: "var(--text-primary)",
+          fontWeight: 650,
+          fontSize: "0.8rem",
+          textAlign: "left",
+          transition: "background 0.2s",
+        }}
+        className="collapsible-section-header"
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          {title}
+        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          {headerRight}
+          {isOpen ? <ChevronDown size={14} style={{ color: "var(--text-secondary)" }} /> : <ChevronRight size={14} style={{ color: "var(--text-secondary)" }} />}
+        </div>
+      </button>
+      {isOpen && (
+        <div style={{ padding: "0.85rem", display: "grid", gap: "0.65rem" }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportSillyTavernCard, onTagSelect, compact = false }: MetadataInspectorProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>("summary");
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [copiedRawPrompt, setCopiedRawPrompt] = useState(false);
+  const [copiedNegativePrompt, setCopiedNegativePrompt] = useState(false);
+  const [copiedRawNegativePrompt, setCopiedRawNegativePrompt] = useState(false);
+  const [copiedVision, setCopiedVision] = useState(false);
+  const [copiedWorkflow, setCopiedWorkflow] = useState(false);
   const [copiedRaw, setCopiedRaw] = useState(false);
   const [copiedCard, setCopiedCard] = useState(false);
   const processedPrompt = metadata.processed_prompt || metadata.prompt;
@@ -200,41 +270,48 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
       {activeTab === "summary" && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
           {image && (
-            <div style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: "8px", padding: "0.85rem", display: "grid", gap: "0.55rem", fontSize: "0.8rem" }}>
-              <Field label="File" value={image.name} />
-              <Field label="Source" value={image.sourceName || "Generated / Unknown"} />
-              <Field label="Path" value={image.relativePath || "-"} />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-                <Field label="Type" value={image.mediaType || "image"} />
-                <Field label="Size" value={formatBytes(image.size)} />
+            <CollapsibleSection title="File Details" defaultOpen={true}>
+              <div style={{ display: "grid", gap: "0.55rem", fontSize: "0.8rem" }}>
+                <Field label="File" value={image.name} />
+                <Field label="Source" value={image.sourceName || "Generated / Unknown"} />
+                <Field label="Path" value={image.relativePath || "-"} />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+                  <Field label="Type" value={image.mediaType || "image"} />
+                  <Field label="Size" value={formatBytes(image.size)} />
+                </div>
               </div>
-            </div>
+            </CollapsibleSection>
           )}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", background: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: "8px", padding: "0.85rem", fontSize: "0.8rem" }}>
-            <Field label="Dimensions" value={metadata.width && metadata.height ? `${metadata.width} x ${metadata.height}` : "-"} />
-            <Field label="Generator" value={metadata.generator} />
-            <Field label="Checkpoint" value={metadata.checkpoint} />
-            <Field label="Seed" value={metadata.seed} />
-            <Field label="Steps" value={metadata.steps} />
-            <Field label="CFG" value={metadata.cfg_scale} />
-            <Field label="Sampler" value={metadata.sampler_name} />
-            <Field label="Scheduler" value={metadata.scheduler} />
-          </div>
-          <div style={{ background: "var(--bg-secondary)", border: `1px solid ${metadata.nsfw_detected ? "rgba(248,113,113,0.42)" : "var(--border-color)"}`, borderRadius: "8px", padding: "0.85rem", display: "grid", gap: "0.65rem", fontSize: "0.8rem" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.6rem" }}>
-              <strong style={{ display: "flex", alignItems: "center", gap: "0.4rem", color: metadata.nsfw_detected ? "#fca5a5" : "var(--text-main)" }}>
-                <ShieldAlert size={15} /> Safety / Quality
-              </strong>
-              <span style={{ color: metadata.nsfw_detected ? "#fca5a5" : "var(--text-secondary)", fontWeight: 800 }}>{nsfwStatus}</span>
+          <CollapsibleSection title="Generation Parameters" defaultOpen={true}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", fontSize: "0.8rem" }}>
+              <Field label="Dimensions" value={metadata.width && metadata.height ? `${metadata.width} x ${metadata.height}` : "-"} />
+              <Field label="Generator" value={metadata.generator} />
+              <Field label="Checkpoint" value={metadata.checkpoint} />
+              <Field label="Seed" value={metadata.seed} />
+              <Field label="Steps" value={metadata.steps} />
+              <Field label="CFG" value={metadata.cfg_scale} />
+              <Field label="Sampler" value={metadata.sampler_name} />
+              <Field label="Scheduler" value={metadata.scheduler} />
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+          </CollapsibleSection>
+          <CollapsibleSection
+            title="Safety / Quality"
+            defaultOpen={true}
+            borderColor={metadata.nsfw_detected ? "rgba(248,113,113,0.42)" : undefined}
+            headerRight={
+              <span style={{ color: metadata.nsfw_detected ? "#fca5a5" : "var(--text-secondary)", fontWeight: 800, fontSize: "0.75rem", marginRight: "0.5rem" }}>
+                {nsfwStatus}
+              </span>
+            }
+          >
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", fontSize: "0.8rem" }}>
               <Field label="NSFW Score" value={nsfwScore} />
               <Field label="Prompt Signal" value={metadata.nsfw_prompt_flagged ? "Yes" : hasSafetyData ? "No" : "-"} />
               <Field label="Sharpness" value={metadata.quality_sharpness_score} />
               <Field label="Scanned" value={metadata.safety_quality_scanned_at || metadata.quality_scanned_at || "-"} />
             </div>
             {qualityWarnings.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginTop: "0.25rem" }}>
                 {qualityWarnings.map((warning) => (
                   <span key={warning} style={{ border: "1px solid rgba(250,204,21,0.32)", background: "rgba(250,204,21,0.08)", color: "#facc15", borderRadius: "999px", padding: "0.2rem 0.45rem", fontSize: "0.7rem", fontWeight: 700 }}>
                     {warning}
@@ -242,7 +319,7 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
                 ))}
               </div>
             )}
-          </div>
+          </CollapsibleSection>
         </div>
       )}
 
@@ -250,8 +327,8 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
         <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
             <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "var(--accent)", textTransform: "uppercase" }}>Processed Prompt</span>
-            <button onClick={() => void copyText(processedPrompt, setCopiedPrompt)} disabled={!processedPrompt} style={{ border: "1px solid var(--border-color)" }}>
-              {copiedPrompt ? <Check size={13} /> : <Copy size={13} />} {copiedPrompt ? "Copied" : "Copy"}
+            <button onClick={() => void copyText(processedPrompt, setCopiedPrompt)} disabled={!processedPrompt} style={{ border: "1px solid var(--border-color)", padding: "0.25rem 0.5rem", fontSize: "0.7rem" }}>
+              {copiedPrompt ? <Check size={12} /> : <Copy size={12} />} {copiedPrompt ? "Copied" : "Copy"}
             </button>
           </div>
           <TextBox value={processedPrompt} maxHeight={compact ? 120 : 170} compact={compact} />
@@ -259,8 +336,8 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
             <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
                 <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase" }}>Raw Prompt</span>
-                <button onClick={() => void copyText(rawPrompt, setCopiedRawPrompt)} style={{ border: "1px solid var(--border-color)" }}>
-                  {copiedRawPrompt ? <Check size={13} /> : <Copy size={13} />} {copiedRawPrompt ? "Copied" : "Copy Raw"}
+                <button onClick={() => void copyText(rawPrompt, setCopiedRawPrompt)} style={{ border: "1px solid var(--border-color)", padding: "0.25rem 0.5rem", fontSize: "0.7rem" }}>
+                  {copiedRawPrompt ? <Check size={12} /> : <Copy size={12} />} {copiedRawPrompt ? "Copied" : "Copy Raw"}
                 </button>
               </div>
               <TextBox value={rawPrompt} maxHeight={compact ? 95 : 130} compact={compact} />
@@ -268,9 +345,24 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
           )}
           {processedNegativePrompt && (
             <>
-              <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "#f87171", textTransform: "uppercase" }}>Negative Prompt</span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
+                <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "#f87171", textTransform: "uppercase" }}>Negative Prompt</span>
+                <button onClick={() => void copyText(processedNegativePrompt, setCopiedNegativePrompt)} disabled={!processedNegativePrompt} style={{ border: "1px solid var(--border-color)", padding: "0.25rem 0.5rem", fontSize: "0.7rem" }}>
+                  {copiedNegativePrompt ? <Check size={12} /> : <Copy size={12} />} {copiedNegativePrompt ? "Copied" : "Copy"}
+                </button>
+              </div>
               <TextBox value={processedNegativePrompt} maxHeight={compact ? 85 : 110} compact={compact} />
-              {rawNegativePrompt ? <TextBox value={`Raw: ${rawNegativePrompt}`} maxHeight={compact ? 75 : 90} compact={compact} /> : null}
+              {rawNegativePrompt && (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginTop: "0.35rem" }}>
+                    <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase" }}>Raw Negative Prompt</span>
+                    <button onClick={() => void copyText(rawNegativePrompt, setCopiedRawNegativePrompt)} style={{ border: "1px solid var(--border-color)", padding: "0.25rem 0.5rem", fontSize: "0.7rem" }}>
+                      {copiedRawNegativePrompt ? <Check size={12} /> : <Copy size={12} />} {copiedRawNegativePrompt ? "Copied" : "Copy Raw"}
+                    </button>
+                  </div>
+                  <TextBox value={rawNegativePrompt} maxHeight={compact ? 75 : 90} compact={compact} />
+                </>
+              )}
             </>
           )}
           {tags.length > 0 && (
@@ -301,6 +393,12 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
 
       {activeTab === "vision" && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
+            <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "var(--accent)", textTransform: "uppercase" }}>Vision Analysis</span>
+            <button onClick={() => void copyText(metadata.vision_llm_analysis, setCopiedVision)} disabled={!metadata.vision_llm_analysis} style={{ border: "1px solid var(--border-color)", padding: "0.25rem 0.5rem", fontSize: "0.7rem" }}>
+              {copiedVision ? <Check size={12} /> : <Copy size={12} />} {copiedVision ? "Copied" : "Copy"}
+            </button>
+          </div>
           <TextBox value={metadata.vision_llm_analysis} maxHeight={compact ? 190 : 300} compact={compact} />
           <span style={{ color: "var(--text-muted)", fontSize: "0.74rem" }}>
             {metadata.vision_llm_source || "KoboldCpp"}{metadata.vision_llm_updated_at ? ` - ${metadata.vision_llm_updated_at}` : ""}
@@ -313,6 +411,12 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", background: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: "8px", padding: "0.85rem", fontSize: "0.8rem" }}>
             <Field label="Format" value={metadata.workflow_format} />
             <Field label="Confidence" value={metadata.visual_workflow_confidence} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
+            <span style={{ fontSize: "0.75rem", fontWeight: 800, color: "var(--accent)", textTransform: "uppercase" }}>Workflow Text</span>
+            <button onClick={() => void copyText(metadata.workflow_text as string | undefined, setCopiedWorkflow)} disabled={!metadata.workflow_text} style={{ border: "1px solid var(--border-color)", padding: "0.25rem 0.5rem", fontSize: "0.7rem" }}>
+              {copiedWorkflow ? <Check size={12} /> : <Copy size={12} />} {copiedWorkflow ? "Copied" : "Copy"}
+            </button>
           </div>
           <TextBox value={metadata.workflow_text as string | undefined} maxHeight={compact ? 190 : 300} compact={compact} />
         </div>
@@ -354,3 +458,4 @@ export function MetadataInspector({ metadata, image, onSendToWorkshop, onImportS
     </div>
   );
 }
+

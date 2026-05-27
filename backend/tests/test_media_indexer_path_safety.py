@@ -16,7 +16,7 @@ if str(MEDIA_INDEXER_SRC) not in sys.path:
 
 def test_validate_source_root_accepts_windows_drive_paths(monkeypatch, tmp_path):
     mount_root = tmp_path / "hostfs"
-    allowed_root = mount_root / "x"
+    allowed_root = mount_root / "j"
     target = allowed_root / "photos" / "set-a"
     target.mkdir(parents=True)
 
@@ -28,9 +28,9 @@ def test_validate_source_root_accepts_windows_drive_paths(monkeypatch, tmp_path)
 
     get_settings.cache_clear()
     try:
-        validated = validate_source_root(r"X:\photos\set-a")
+        validated = validate_source_root(r"J:\photos\set-a")
         assert validated == str(target.resolve())
-        assert display_source_root(validated) == r"X:\photos\set-a"
+        assert display_source_root(validated) == r"J:\photos\set-a"
     finally:
         get_settings.cache_clear()
 

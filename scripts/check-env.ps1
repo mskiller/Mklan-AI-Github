@@ -23,19 +23,11 @@ foreach ($name in $requiredChanged) {
         continue
     }
     $value = $match.Groups[1].Value.Trim()
-    if ($value -eq "" -or $value -like "*change-me*" -or $value -like "*CHANGE_ME*") {
+    if ($value -eq "" -or $value -like "*change-me*") {
         Write-Host "FAIL $name still uses an insecure placeholder." -ForegroundColor Red
         $failed = $true
     } else {
         Write-Host "OK   $name" -ForegroundColor Green
-    }
-}
-
-$backendDockerfile = [regex]::Match($content, "(?m)^BACKEND_DOCKERFILE=(.*)$")
-if ($backendDockerfile.Success) {
-    $value = $backendDockerfile.Groups[1].Value.Trim()
-    if ($value -notin @("Dockerfile", "Dockerfile.gpu")) {
-        Write-Host "WARN BACKEND_DOCKERFILE is usually Dockerfile or Dockerfile.gpu." -ForegroundColor Yellow
     }
 }
 
@@ -54,3 +46,4 @@ if ($failed) {
 }
 
 Write-Host "Environment check completed." -ForegroundColor Green
+

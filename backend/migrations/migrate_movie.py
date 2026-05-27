@@ -1,69 +1,92 @@
-#!/usr/bin/env python3
-"""
-Migrate Movie tool database to Mklan Studio structure.
-
-Usage: python migrate_movie.py [--source PATH] [--dry-run]
-"""
-from __future__ import annotations
-
-import argparse
-import shutil
 import sqlite3
-import os
+import logging
+import sys
 from pathlib import Path
+from sqlmodel import Session, SQLModel
+from sqlalchemy import create_engine
 
+# Add backend to sys.path so we can import from app
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-def find_movie_db() -> Path | None:
-    """Search common locations for movie_tool.db."""
-    candidates = [
-        Path(os.environ.get("MOVIE_DB", "")),
-        Path(__file__).parents[2] / "data" / "movie_tool.db",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
+from app.v2.core_db import studio_database_url
+from app.v2.models_movie import (
+    MovieProject,
+    MovieStoryScene,
+    MovieStoryBeat,
+    MovieScene,
+    MovieSceneImageVariant,
+    MovieSequenceVideoVariant,
+    MovieClipAsset,
+    MovieJob,
+    MovieContinuityReview,
+    MovieExportAsset,
+    MovieProjectCharacter,
+    MovieAppSetting,
+)
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def migrate(source: Path | None, target_dir: Path, dry_run: bool = False):
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / "movie_tool.db"
-    
-    if source is None:
-        print("No source database found — will create new at target location")
-        if not dry_run:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(target_path)
-            conn.close()
+def migrate():
+    sqlite_db_path = "data/movie/movie_tool.db"
+    if not Path(sqlite_db_path).exists():
+        logger.error(f"SQLite database not found at {sqlite_db_path}")
         return
-    
-    print(f"Source: {source}")
-    print(f"Target: {target_path}")
-    
-    if dry_run:
-        print("[DRY RUN] Would copy database")
-        return
-    
-    if target_path.exists():
-        backup = target_path.with_name(f"movie_tool.backup.db")
-        shutil.copy2(target_path, backup)
-        print(f"  Backed up existing DB to {backup}")
-    
-    shutil.copy2(source, target_path)
-    print(f"  Copied {source.stat().st_size / 1024 / 1024:.1f} MB")
 
+    pg_url = studio_database_url()
+    if not pg_url:
+        logger.error("STUDIO_DATABASE_URL not set")
+        return
+        
+    if pg_url.startswith("postgresql://"):
+        pg_url = pg_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    
+    logger.info(f"Connecting to PostgreSQL at {pg_url}")
+    pg_engine = create_engine(pg_url)
+    SQLModel.metadata.create_all(pg_engine)
+    
+    sqlite_conn = sqlite3.connect(sqlite_db_path)
+    sqlite_conn.row_factory = sqlite3.Row
+    sqlite_cursor = sqlite_conn.cursor()
+
+    tables = {
+        "projects": MovieProject,
+        "story_scenes": MovieStoryScene,
+        "story_beats": MovieStoryBeat,
+        "scenes": MovieScene,
+        "scene_image_variants": MovieSceneImageVariant,
+        "sequence_video_variants": MovieSequenceVideoVariant,
+        "clip_assets": MovieClipAsset,
+        "jobs": MovieJob,
+        "continuity_reviews": MovieContinuityReview,
+        "export_assets": MovieExportAsset,
+        "project_characters": MovieProjectCharacter,
+        "app_settings": MovieAppSetting,
+    }
+
+    with Session(pg_engine) as session:
+        for table_name, model_cls in tables.items():
+            logger.info(f"Migrating {table_name}...")
+            try:
+                sqlite_cursor.execute(f"SELECT * FROM {table_name}")
+                batch = []
+                for row in sqlite_cursor:
+                    data = dict(row)
+                    data["workspace_id"] = "default"
+                    obj = model_cls(**data)
+                    batch.append(obj)
+                    if len(batch) >= 1000:
+                        session.add_all(batch)
+                        session.commit()
+                        batch.clear()
+                if batch:
+                    session.add_all(batch)
+                    session.commit()
+            except sqlite3.OperationalError as e:
+                logger.warning(f"Failed to fetch {table_name}: {e}")
+                
+    logger.info("Migration successfully completed!")
+    sqlite_conn.close()
 
 if __name__ == "__main__":
-    import os
-    parser = argparse.ArgumentParser(description="Migrate Movie Tool DB")
-    parser.add_argument("--source", type=Path, default=None)
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--target", type=Path, default=None)
-    args = parser.parse_args()
-    
-    source = args.source or find_movie_db()
-    target = args.target or (Path(__file__).parents[2] / "data" / "movie")
-    
-    print(f"=== Movie DB Migration ===")
-    migrate(source, target, args.dry_run)
-    print("Done")
+    migrate()

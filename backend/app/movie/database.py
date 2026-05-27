@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-import sqlite3
+from app.v2.core_db import connect_core_db
 
 
 SCHEMA = """
@@ -257,24 +257,12 @@ class Database:
         self.db_path = db_path
 
     def initialize(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as connection:
-            connection.executescript(SCHEMA)
-            self._migrate(connection)
+        pass
 
     @contextmanager
-    def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        try:
+    def connect(self):
+        with connect_core_db(dict_rows=True) as connection:
             yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     def _migrate(self, connection: sqlite3.Connection) -> None:
         self._ensure_columns(

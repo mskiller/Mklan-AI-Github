@@ -13,6 +13,18 @@ def _client(monkeypatch, tmp_path):
     from app.cards.config import get_settings
 
     get_settings.cache_clear()
+
+    from app.v2.core_db import core_db_enabled, connect_core_db
+    if core_db_enabled():
+        with connect_core_db(dict_rows=False) as conn:
+            with conn.cursor() as cursor:
+                # Truncate all cards tables to start tests with a clean slate
+                cursor.execute(
+                    "TRUNCATE TABLE shared_character_vault, shared_lore_vault, compatibility_reports, "
+                    "image_candidates, generation_runs, user_profiles, lore_entries, characters, projects CASCADE"
+                )
+            conn.commit()
+
     from app.cards.main import create_app
 
     return TestClient(create_app())
@@ -74,3 +86,31 @@ def test_cards_sillytavern_default_port(monkeypatch, tmp_path):
         response = client.get("/system/sillytavern")
         assert response.status_code == 200
         assert response.json()["public_url"] == "http://localhost:8011"
+
+
+def test_upload_project_asset_success_and_traversal(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        # 1. Create a project
+        proj_resp = client.post("/projects", json={"name": "Upload Test"})
+        assert proj_resp.status_code == 200
+        proj = proj_resp.json()
+        proj_id = proj["id"]
+
+        # 2. Upload file successfully
+        file_data = b"fake-png-content"
+        resp = client.post(
+            f"/projects/{proj_id}/assets/upload",
+            data={"asset_path": "character-assets/face_happy.png"},
+            files={"file": ("face_happy.png", file_data, "image/png")}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"relative_path": "character-assets/face_happy.png"}
+
+        # 3. Test directory traversal protection
+        bad_resp = client.post(
+            f"/projects/{proj_id}/assets/upload",
+            data={"asset_path": "../../../outside.png"},
+            files={"file": ("outside.png", file_data, "image/png")}
+        )
+        assert bad_resp.status_code == 400
+

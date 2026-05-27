@@ -38,6 +38,7 @@ import { MetadataInspector } from "../components/MetadataInspector";
 import { CompareWorkspace } from "../components/CompareWorkspace";
 import { useDeviceMode } from "../hooks/useDeviceMode";
 import { useUiPreferences } from "../hooks/useUiPreferences";
+import { useTranslation } from "../i18n";
 
 interface GalleryMeta {
   prompt?: string;
@@ -245,90 +246,7 @@ interface ConnectorHealthItem {
   endpoint?: string;
 }
 
-const i18n = {
-  en: {
-    title: "Media Explorer & Comparer",
-    subtitle: "items mapped · read-only indexing for mounted folders",
-    shortcuts: "Shortcuts",
-    searchAssets: "Search indexed assets...",
-    refresh: "Refresh",
-    uploadImages: "Upload Images",
-    uploadFolder: "Upload Folder",
-    allAssets: "All Assets",
-    indexedSources: "Indexed Sources",
-    collections: "Collections",
-    scanBasic: "Basic Index",
-    scanMetadata: "Scan Metadata",
-    scanAi: "CLIP / AI Scan",
-    library: "Library",
-    filters: "Filters",
-    scanCenter: "Scan Center",
-    loadMore: "Load More",
-    openDetails: "Open image details",
-    addSelection: "Add to selection",
-    removeSelection: "Remove from selection",
-    addCollection: "Add to collection",
-    addNsfw: "Add NSFW tag",
-    basicIndexFile: "Basic index this file",
-    visionLlmScan: "Scan with Vision LLM (KoboldCpp)",
-    copyPromptTags: "Copy prompt tags",
-    exportWorkflow: "Export workflow JSON",
-    sendWildcards: "Send to Wildcards",
-    openOriginal: "Open original image",
-    viewControls: "View Controls",
-    hideNsfw: "Hide NSFW",
-    liveIndexed: "Live + Indexed",
-    indexedOnly: "Indexed only",
-    pageSize: "Page size",
-    chooseCollection: "Add to Collection...",
-    selectedCount: "selected",
-    bulkAddTag: "Bulk Add Tag",
-    addNsfwSelected: "Mark NSFW",
-    clearSelection: "Clear Selection",
-    compareSelected: "Compare Selected",
-  },
-  fr: {
-    title: "Galerie et comparateur",
-    subtitle: "elements indexes · indexation en lecture seule",
-    shortcuts: "Raccourcis",
-    searchAssets: "Rechercher dans la galerie...",
-    refresh: "Rafraichir",
-    uploadImages: "Importer images",
-    uploadFolder: "Importer dossier",
-    allAssets: "Tous les assets",
-    indexedSources: "Sources indexees",
-    collections: "Collections",
-    scanBasic: "Index simple",
-    scanMetadata: "Scan metadata",
-    scanAi: "Scan CLIP / IA",
-    library: "Bibliotheque",
-    filters: "Filtres",
-    scanCenter: "Centre de scan",
-    loadMore: "Charger plus",
-    openDetails: "Ouvrir les details",
-    addSelection: "Ajouter a la selection",
-    removeSelection: "Retirer de la selection",
-    addCollection: "Ajouter a une collection",
-    addNsfw: "Ajouter tag NSFW",
-    basicIndexFile: "Indexer ce fichier",
-    visionLlmScan: "Scanner avec Vision LLM (KoboldCpp)",
-    copyPromptTags: "Copier les tags du prompt",
-    exportWorkflow: "Exporter le workflow JSON",
-    sendWildcards: "Envoyer vers Wildcards",
-    openOriginal: "Ouvrir l'image originale",
-    viewControls: "Controles de vue",
-    hideNsfw: "Masquer NSFW",
-    liveIndexed: "Live + Indexe",
-    indexedOnly: "Indexe seulement",
-    pageSize: "Taille page",
-    chooseCollection: "Ajouter a une collection...",
-    selectedCount: "selectionnes",
-    bulkAddTag: "Taguer en masse",
-    addNsfwSelected: "Marquer NSFW",
-    clearSelection: "Vider selection",
-    compareSelected: "Comparer selection",
-  },
-} as const;
+
 
 interface TagCount {
   tag: string;
@@ -396,12 +314,9 @@ const galleryTabs: Array<{ id: GalleryTab; label: string; icon: React.ComponentT
   { id: "browse", label: "Browse", icon: Images, group: "Explore" },
   { id: "metadata", label: "Metadata Search", icon: Search, group: "Explore" },
   { id: "collections", label: "Collections", icon: Archive, group: "Organize" },
-  { id: "sources", label: "Sources & Scan", icon: Database, group: "Operations" },
-  { id: "jobs", label: "Scan Jobs", icon: Clock, group: "Operations" },
-  { id: "tools", label: "Generation Tools", icon: Sparkles, group: "Operations" },
 ];
 
-const galleryTabGroups: GalleryTabGroup[] = ["Explore", "Organize", "Operations"];
+const galleryTabGroups: GalleryTabGroup[] = ["Explore", "Organize"];
 
 function readGalleryViewPrefs(): GalleryViewPrefs {
   if (typeof window === "undefined") return DEFAULT_GALLERY_VIEW_PREFS;
@@ -539,7 +454,7 @@ function mapIndexedItem(item: any): GalleryImage {
   const mediaType = item.media_type || metadata.media_type || "image";
   const contentUrl = item.content_url ? `/api/media${item.content_url}` : undefined;
   const previewUrl = item.preview_url ? `/api/media${item.preview_url}` : undefined;
-  const imageUrl = item.id ? `/api/media/assets/${item.id}/image?w=1024` : previewUrl || contentUrl || "";
+  const imageUrl = item.id ? `/api/media/assets/${item.id}/image?w=384` : previewUrl || contentUrl || "";
   const fullImageUrl = item.id ? `/api/media/assets/${item.id}/image?w=2048` : contentUrl;
   return {
     name: item.filename,
@@ -673,14 +588,311 @@ function flattenSourceTree(node: SourceTreeNode, output: SourceTreeNode[] = []):
   return output;
 }
 
+interface GalleryCardProps {
+  image: GalleryImage;
+  isSelected: boolean;
+  isMobile: boolean;
+  copy: any;
+  onToggleSelect: (image: GalleryImage) => void;
+  onOpenDetails: (image: GalleryImage) => void;
+  onZoomImg: (image: GalleryImage) => void;
+  onDeleteImage: (image: GalleryImage) => void;
+  onOpenLiveFolder: (sourceId: string, path: string) => void;
+  onContextMenu: (image: GalleryImage, x: number, y: number) => void;
+}
+
+const GalleryCard = React.memo(
+  function GalleryCard({
+    image,
+    isSelected,
+    isMobile,
+    copy,
+    onToggleSelect,
+    onOpenDetails,
+    onZoomImg,
+    onDeleteImage,
+    onOpenLiveFolder,
+    onContextMenu,
+  }: GalleryCardProps) {
+    const displayPrompt = image.metadata?.processed_prompt || image.metadata?.prompt || "";
+    const safetyScanned = Boolean(image.metadata?.safety_quality_scanned_at || image.metadata?.quality_scanned_at);
+    const isNsfw = isNsfwImage(image);
+    const longPressTimer = useRef<number | null>(null);
+    const longPressTriggered = useRef(false);
+
+    const openMediaDetails = (event: React.MouseEvent<HTMLImageElement | HTMLVideoElement>) => {
+      if (longPressTriggered.current) {
+        longPressTriggered.current = false;
+        event.preventDefault();
+        return;
+      }
+      void onOpenDetails(image);
+    };
+
+    return (
+      <div 
+        className="mklan-gallery-card"
+        data-gallery-card="true"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          onContextMenu(image, event.clientX, event.clientY);
+        }}
+        onTouchStart={(event) => {
+          if (longPressTimer.current) window.clearTimeout(longPressTimer.current);
+          longPressTriggered.current = false;
+          const touch = event.touches[0];
+          longPressTimer.current = window.setTimeout(() => {
+            longPressTriggered.current = true;
+            onContextMenu(image, touch.clientX, touch.clientY);
+          }, 460);
+        }}
+        onTouchEnd={() => {
+          if (longPressTimer.current) {
+            window.clearTimeout(longPressTimer.current);
+            longPressTimer.current = null;
+          }
+        }}
+        onTouchCancel={() => {
+          if (longPressTimer.current) {
+            window.clearTimeout(longPressTimer.current);
+            longPressTimer.current = null;
+          }
+        }}
+        style={{
+          border: `1px solid ${isSelected ? "var(--accent)" : "var(--border-color)"}`,
+          borderRadius: isMobile ? "8px" : "10px",
+          overflow: "hidden",
+          background: "var(--bg-secondary)",
+          display: "flex",
+          flexDirection: "column",
+          transition: "box-shadow 0.2s, border-color 0.2s",
+          boxShadow: isSelected ? "0 0 0 2px var(--accent-glow)" : "none",
+          height: "100%",
+          contain: "content",
+        }}
+      >
+        {/* Image Stage */}
+        <div style={{ position: "relative", width: "100%", aspectRatio: (image.metadata?.width && image.metadata?.height) ? `${image.metadata.width} / ${image.metadata.height}` : "1", background: "#0b0b0d" }}>
+          {image.media_type === "video" ? (
+            <video
+              src={image.fullUrl || image.url}
+              onClick={openMediaDetails}
+              muted
+              playsInline
+              preload="metadata"
+              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover", cursor: "zoom-in" }}
+            />
+          ) : (
+            <img
+              src={image.url}
+              alt={image.metadata?.prompt || image.name}
+              onClick={openMediaDetails}
+              loading="lazy"
+              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover", cursor: "zoom-in" }}
+            />
+          )}
+          {/* Circular selector */}
+          <label style={{ position: "absolute", top: "0.5rem", left: "0.5rem", zIndex: 5, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: "22px", height: "22px", background: isSelected ? "var(--accent)" : "rgba(0,0,0,0.6)", borderRadius: "50%", border: `1px solid ${isSelected ? "var(--accent)" : "rgba(255,255,255,0.3)"}`, transition: "background 0.15s" }}>
+            <input type="checkbox" checked={isSelected} onChange={() => onToggleSelect(image)} style={{ display: "none" }} />
+            {isSelected && <span style={{ color: "#fff", fontSize: "0.75rem", fontWeight: 700 }}>✓</span>}
+          </label>
+          {/* Action overlays */}
+          <div style={{ position: "absolute", top: "0.5rem", right: "0.5rem", display: "flex", gap: "0.25rem", flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "calc(100% - 3.2rem)", zIndex: 6 }}>
+            {image.origin === "mounted" && (
+              <span
+                style={{
+                  background: image.index_state === "indexed" ? "rgba(37, 99, 235, 0.82)" : "rgba(15, 23, 42, 0.72)",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  color: "#fff",
+                  padding: "0.28rem 0.45rem",
+                  borderRadius: "999px",
+                  fontSize: "0.62rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+                title={image.index_state === "indexed" ? "Indexed and available in the media database." : "Visible from the live folder browser while indexing catches up."}
+              >
+                {image.index_state === "indexed" ? "Indexed" : "Live"}
+              </span>
+            )}
+            {safetyScanned && (
+              <span
+                style={{
+                  background: isNsfw ? "rgba(220, 38, 38, 0.84)" : "rgba(22, 163, 74, 0.78)",
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  color: "#fff",
+                  padding: "0.28rem 0.45rem",
+                  borderRadius: "999px",
+                  fontSize: "0.62rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+                title={isNsfw ? "Safety scan detected NSFW signals." : "Safety scan completed without NSFW signals."}
+              >
+                {isNsfw ? "NSFW" : "Safe"}
+              </span>
+            )}
+            <button
+              type="button"
+              className="gallery-asset-action-button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onZoomImg(image);
+              }}
+              title={copy.zoom_info}
+              style={{ background: "rgba(0,0,0,0.6)", border: "none", color: "#fff", padding: "0.4rem", borderRadius: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
+            >
+              <Maximize2 size={16} />
+              {!isMobile && <span>{copy.zoom_info}</span>}
+            </button>
+            <button onClick={() => onDeleteImage(image)} style={{ background: "rgba(0,0,0,0.6)", border: "none", color: image.origin === "generated" ? "#ff6b6b" : "#aab0c0", padding: "0.4rem", borderRadius: "4px", cursor: "pointer", display: "flex", alignItems: "center" }} title={image.origin === "generated" ? "Delete generated image" : "Read-only mounted source"}>
+              <Trash2 size={12} />
+            </button>
+          </div>
+        </div>
+
+        {/* Info summary */}
+        <div style={{ padding: isMobile ? "0.55rem" : "0.75rem", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem", fontSize: "0.75rem" }}>
+          {(image.source_name || image.relative_path) && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+              {image.source_name && (
+                <span style={{ fontSize: "0.68rem", color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{image.source_name}</span>
+              )}
+              {image.relative_path && (
+                <span title={image.relative_path} style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{image.relative_path}</span>
+              )}
+              {image.source_id && image.relative_path && (
+                <button
+                  type="button"
+                  className="gallery-asset-action-button source"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenLiveFolder(image.source_id!, image.relative_path!);
+                  }}
+                  title={copy.readonly_source}
+                  style={{ alignSelf: "flex-start", marginTop: "0.2rem" }}
+                >
+                  <FolderOpen size={16} />
+                  {!isMobile && <span>{copy.readonly_source}</span>}
+                </button>
+              )}
+            </div>
+          )}
+          {displayPrompt ? (
+            <div title={displayPrompt} style={{ color: "var(--text-secondary)", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden', lineHeight: 1.4 }}>
+              {displayPrompt}
+            </div>
+          ) : (
+            <div style={{ color: "var(--text-muted)", fontStyle: "italic" }}>No metadata available</div>
+          )}
+          {image.metadata?.steps && (
+            <div style={{ marginTop: "auto", display: "flex", justifyContent: "space-between", opacity: 0.6, fontSize: "0.7rem", paddingTop: "0.25rem", borderTop: "1px solid var(--border-color)" }}>
+              <span>{image.metadata.sampler_name || "—"}</span>
+              <span>CFG {image.metadata.cfg_scale} · {image.metadata.steps} steps</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  },
+  (prev, next) => {
+    return (
+      prev.isSelected === next.isSelected &&
+      prev.isMobile === next.isMobile &&
+      prev.image.id === next.image.id &&
+      prev.image.url === next.image.url &&
+      prev.image.index_state === next.image.index_state &&
+      prev.image.workflow_export_available === next.image.workflow_export_available
+    );
+  }
+);
+
 export function GalleryPage() {
   const navigate = useNavigate();
   const deviceMode = useDeviceMode();
+  const { t } = useTranslation();
   const { language } = useUiPreferences();
-  const copy = i18n[language];
+  const copy = {
+    title: t("gallery.title"),
+    subtitle: t("gallery.subtitle"),
+    shortcuts: t("gallery.shortcuts"),
+    searchAssets: t("gallery.searchAssets"),
+    refresh: t("gallery.refresh"),
+    uploadImages: t("gallery.uploadImages"),
+    uploadFolder: t("gallery.uploadFolder"),
+    allAssets: t("gallery.allAssets"),
+    indexedSources: t("gallery.indexedSources"),
+    collections: t("gallery.collections"),
+    scanBasic: t("gallery.scanBasic"),
+    scanMetadata: t("gallery.scanMetadata"),
+    scanAi: t("gallery.scanAi"),
+    library: t("gallery.library"),
+    filters: t("gallery.filters"),
+    scanCenter: t("gallery.scanCenter"),
+    loadMore: t("gallery.loadMore"),
+    openDetails: t("gallery.openDetails"),
+    addSelection: t("gallery.addSelection"),
+    removeSelection: t("gallery.removeSelection"),
+    addCollection: t("gallery.addCollection"),
+    addNsfw: t("gallery.addNsfw"),
+    basicIndexFile: t("gallery.basicIndexFile"),
+    visionLlmScan: t("gallery.visionLlmScan"),
+    copyPromptTags: t("gallery.copyPromptTags"),
+    exportWorkflow: t("gallery.exportWorkflow"),
+    sendWildcards: t("gallery.sendWildcards"),
+    openOriginal: t("gallery.openOriginal"),
+    viewControls: t("gallery.viewControls"),
+    hideNsfw: t("gallery.hideNsfw"),
+    liveIndexed: t("gallery.liveIndexed"),
+    indexedOnly: t("gallery.indexedOnly"),
+    pageSize: t("gallery.pageSize"),
+    chooseCollection: t("gallery.chooseCollection"),
+    selectedCount: t("gallery.selectedCount"),
+    bulkAddTag: t("gallery.bulkAddTag"),
+    addNsfwSelected: t("gallery.addNsfwSelected"),
+    clearSelection: t("gallery.clearSelection"),
+    compareSelected: t("gallery.compareSelected"),
+    zoom_info: t("gallery.zoom_info"),
+    readonly_source: t("gallery.readonly_source"),
+  };
   const isMobile = deviceMode === "mobile";
   const [images, setImages] = useState<GalleryImage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [inspectorWidth, setInspectorWidth] = useState<number>(360);
+  const isResizing = useRef(false);
+
+  const startResizing = useCallback((mouseDownEvent: React.MouseEvent) => {
+    mouseDownEvent.preventDefault();
+    isResizing.current = true;
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing.current) return;
+      const newWidth = window.innerWidth - e.clientX;
+      if (newWidth >= 280 && newWidth <= 650) {
+        setInspectorWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      if (isResizing.current) {
+        isResizing.current = false;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
+
   const [loadingMore, setLoadingMore] = useState(false);
   const [assetPage, setAssetPage] = useState(1);
   const [assetTotal, setAssetTotal] = useState<number | null>(null);
@@ -1946,6 +2158,7 @@ export function GalleryPage() {
           display: "grid",
           gridTemplateColumns: isMobile ? "repeat(auto-fill, minmax(150px, 1fr))" : "repeat(auto-fill, minmax(240px, 1fr))",
           gap: isMobile ? "0.65rem" : "1rem",
+          alignItems: "start",
           paddingBottom: "2rem",
           ...props.style,
         }}
@@ -2017,6 +2230,16 @@ export function GalleryPage() {
     } finally {
       setScanCommandBusy(null);
     }
+  };
+
+  const openLiveSourceFolder = (sourceId: string, relativePath: string) => {
+    const parts = relativePath.split(/[/\\]/);
+    parts.pop();
+    const parentPath = parts.join('/');
+    setActiveSourceId(sourceId);
+    setActiveCollectionId(null);
+    setCurrentSourcePath(parentPath);
+    setActiveTab("sources");
   };
 
   const handleSourceTreeClick = async (node: SourceTreeNode) => {
@@ -2247,7 +2470,7 @@ export function GalleryPage() {
         </div>
 
         <div style={{ width: "100%", display: "flex", alignItems: "center", gap: "0.55rem", flexWrap: "wrap", color: "var(--text-secondary)", fontSize: "0.8rem" }}>
-          <span>{assetTotal !== null ? `${images.length} / ${assetTotal} loaded` : `${images.length} loaded`}</span>
+          <span>{assetTotal !== null ? t("gallery.loaded", { count: images.length, total: assetTotal }) : t("gallery.loaded_simple", { count: images.length })}</span>
           {activeTagFilter && (
             <button onClick={() => setActiveTagFilter(null)} style={{ border: "1px solid var(--border-color)", color: "var(--text-secondary)", padding: "0.35rem 0.55rem" }}>
               Tag: {activeTagFilter} <X size={13} />
@@ -2550,7 +2773,7 @@ export function GalleryPage() {
                 onClick={() => {
                   setActiveCollectionId(null);
                   setActiveSourceId(source.id);
-                  setActiveTab("sources");
+                  setActiveTab("browse");
                   setSourceMessage(null);
                 }}
                 style={{ textAlign: "left", background: activeSourceId === source.id ? "rgba(99,102,241,0.15)" : "transparent", color: activeSourceId === source.id ? "var(--accent)" : "var(--text-secondary)", border: "none", padding: "0.6rem 1rem", borderRadius: "6px", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "0.15rem", cursor: "pointer", transition: "background 0.2s" }}
@@ -2585,12 +2808,9 @@ export function GalleryPage() {
       {/* Main Gallery Area */}
       <div style={{ flex: 1, padding: isMobile ? "1rem" : "2rem", display: "flex", flexDirection: "column", gap: isMobile ? "1rem" : "1.5rem", overflowY: "auto", position: "relative" }}>
         {isMobile && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "0.55rem" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "0.55rem" }}>
             <button onClick={() => setMobileLibraryOpen(true)} style={{ minHeight: 44, border: "1px solid var(--border-color)" }}>
               <PanelLeft size={16} /> {copy.library}
-            </button>
-            <button onClick={() => setMobileScanOpen(true)} style={{ minHeight: 44, border: "1px solid var(--border-color)" }}>
-              <ListChecks size={16} /> Scan
             </button>
             <button onClick={() => setMobileFiltersOpen(true)} style={{ minHeight: 44, border: "1px solid var(--border-color)" }}>
               <Filter size={16} /> {copy.filters}
@@ -2658,7 +2878,7 @@ export function GalleryPage() {
 
       {isMobile && activeTab === "browse" && (
         <section style={{ padding: "0.85rem", background: "rgba(255,255,255,0.025)", border: "1px solid var(--border-color)", borderRadius: "12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
-          <span style={{ color: "var(--text-secondary)", fontSize: "0.84rem" }}>{assetTotal !== null ? `${images.length} / ${assetTotal}` : `${images.length}`} loaded</span>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.84rem" }}>{assetTotal !== null ? t("gallery.loaded", { count: images.length, total: assetTotal }) : t("gallery.loaded_simple", { count: images.length })}</span>
           <button onClick={() => setMobileFiltersOpen(true)} style={{ border: "1px solid var(--border-color)" }}>
             <SlidersHorizontal size={16} /> {copy.viewControls}
           </button>
@@ -2666,8 +2886,6 @@ export function GalleryPage() {
       )}
 
       {renderSelectionRail()}
-
-      {!isMobile && renderScanCommandCenter()}
 
       <nav style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(220px, 1fr) minmax(180px, 0.75fr) minmax(320px, 1.3fr)", gap: "0.55rem", padding: "0.5rem", background: "rgba(255,255,255,0.025)", border: "1px solid var(--border-color)", borderRadius: "14px" }}>
         {galleryTabGroups.map((group) => (
@@ -3328,168 +3546,36 @@ export function GalleryPage() {
           totalCount={images.length}
           components={galleryGridComponents}
           computeItemKey={(index) => getSelectionKey(images[index])}
+          endReached={() => {
+            if (!loadingMore && hasMoreAssets) {
+              void loadMoreImages();
+            }
+          }}
           itemContent={(index) => {
             const img = images[index];
             const isSelected = selectedKeys.includes(getSelectionKey(img));
-            const displayPrompt = img.metadata?.processed_prompt || img.metadata?.prompt || "";
-            const safetyScanned = Boolean(img.metadata?.safety_quality_scanned_at || img.metadata?.quality_scanned_at);
-            const isNsfw = isNsfwImage(img);
-            const openMediaDetails = (event: React.MouseEvent<HTMLImageElement | HTMLVideoElement>) => {
-              if (longPressTriggered.current) {
-                longPressTriggered.current = false;
-                event.preventDefault();
-                return;
-              }
-              void openImageDetails(img);
-            };
             return (
-              <div 
-                key={img.name} 
-                className="mklan-gallery-card"
-                data-gallery-card="true"
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  setContextMenu({ image: img, x: event.clientX, y: event.clientY });
+              <GalleryCard
+                image={img}
+                isSelected={isSelected}
+                isMobile={isMobile}
+                copy={copy}
+                onToggleSelect={toggleSelect}
+                onOpenDetails={openImageDetails}
+                onZoomImg={setZoomImg}
+                onDeleteImage={deleteImage}
+                onOpenLiveFolder={openLiveSourceFolder}
+                onContextMenu={(image, x, y) => {
+                  setContextMenu({ image, x, y });
                 }}
-                onTouchStart={(event) => {
-                  if (longPressTimer.current) window.clearTimeout(longPressTimer.current);
-                  longPressTriggered.current = false;
-                  const touch = event.touches[0];
-                  longPressTimer.current = window.setTimeout(() => {
-                    longPressTriggered.current = true;
-                    setContextMenu({ image: img, x: touch.clientX, y: touch.clientY });
-                  }, 460);
-                }}
-                onTouchEnd={() => {
-                  if (longPressTimer.current) {
-                    window.clearTimeout(longPressTimer.current);
-                    longPressTimer.current = null;
-                  }
-                }}
-                onTouchCancel={() => {
-                  if (longPressTimer.current) {
-                    window.clearTimeout(longPressTimer.current);
-                    longPressTimer.current = null;
-                  }
-                }}
-                style={{
-                  border: `1px solid ${isSelected ? "var(--accent)" : "var(--border-color)"}`,
-                  borderRadius: isMobile ? "8px" : "10px",
-                  overflow: "hidden",
-                  background: "var(--bg-secondary)",
-                  display: "flex",
-                  flexDirection: "column",
-                  transition: "box-shadow 0.2s, border-color 0.2s",
-                  boxShadow: isSelected ? "0 0 0 2px var(--accent-glow)" : "none",
-                  height: "100%"
-                }}
-              >
-                {/* Image Stage */}
-                <div style={{ position: "relative", width: "100%", paddingTop: "100%", background: "#0b0b0d" }}>
-                  {img.media_type === "video" ? (
-                    <video
-                      src={img.fullUrl || img.url}
-                      onClick={openMediaDetails}
-                      muted
-                      playsInline
-                      preload="metadata"
-                      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover", cursor: "zoom-in" }}
-                    />
-                  ) : (
-                    <img
-                      src={img.url}
-                      alt={img.metadata?.prompt || img.name}
-                      onClick={openMediaDetails}
-                      loading="lazy"
-                      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover", cursor: "zoom-in" }}
-                    />
-                  )}
-                  {/* Circular selector */}
-                  <label style={{ position: "absolute", top: "0.5rem", left: "0.5rem", zIndex: 5, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: "22px", height: "22px", background: isSelected ? "var(--accent)" : "rgba(0,0,0,0.6)", borderRadius: "50%", border: `1px solid ${isSelected ? "var(--accent)" : "rgba(255,255,255,0.3)"}`, transition: "background 0.15s" }}>
-                    <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(img)} style={{ display: "none" }} />
-                    {isSelected && <span style={{ color: "#fff", fontSize: "0.75rem", fontWeight: 700 }}>✓</span>}
-                  </label>
-                  {/* Action overlays */}
-                  <div style={{ position: "absolute", top: "0.5rem", right: "0.5rem", display: "flex", gap: "0.25rem", flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "calc(100% - 3.2rem)", zIndex: 6 }}>
-                    {img.origin === "mounted" && (
-                      <span
-                        style={{
-                      background: img.index_state === "indexed" ? "rgba(37, 99, 235, 0.82)" : "rgba(15, 23, 42, 0.72)",
-                          border: "1px solid rgba(255,255,255,0.12)",
-                          color: "#fff",
-                          padding: "0.28rem 0.45rem",
-                          borderRadius: "999px",
-                          fontSize: "0.62rem",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.05em",
-                        }}
-                        title={img.index_state === "indexed" ? "Indexed and available in the media database." : "Visible from the live folder browser while indexing catches up."}
-                      >
-                        {img.index_state === "indexed" ? "Indexed" : "Live"}
-                      </span>
-                    )}
-                    {safetyScanned && (
-                      <span
-                        style={{
-                          background: isNsfw ? "rgba(220, 38, 38, 0.84)" : "rgba(22, 163, 74, 0.78)",
-                          border: "1px solid rgba(255,255,255,0.14)",
-                          color: "#fff",
-                          padding: "0.28rem 0.45rem",
-                          borderRadius: "999px",
-                          fontSize: "0.62rem",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.05em",
-                        }}
-                        title={isNsfw ? "Safety scan detected NSFW signals." : "Safety scan completed without NSFW signals."}
-                      >
-                        {isNsfw ? "NSFW" : "Safe"}
-                      </span>
-                    )}
-                    <button onClick={() => void openImageDetails(img)} style={{ background: "rgba(0,0,0,0.6)", border: "none", color: "#fff", padding: "0.4rem", borderRadius: "4px", cursor: "pointer", display: "flex", alignItems: "center" }} title="Zoom Image Info">
-                      <Maximize2 size={12} />
-                    </button>
-                    <button onClick={() => deleteImage(img)} style={{ background: "rgba(0,0,0,0.6)", border: "none", color: img.origin === "generated" ? "#ff6b6b" : "#aab0c0", padding: "0.4rem", borderRadius: "4px", cursor: "pointer", display: "flex", alignItems: "center" }} title={img.origin === "generated" ? "Delete generated image" : "Read-only mounted source"}>
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Info summary */}
-                <div style={{ padding: isMobile ? "0.55rem" : "0.75rem", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem", fontSize: "0.75rem" }}>
-                  {(img.source_name || img.relative_path) && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
-                      {img.source_name && (
-                        <span style={{ fontSize: "0.68rem", color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{img.source_name}</span>
-                      )}
-                      {img.relative_path && (
-                        <span title={img.relative_path} style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{img.relative_path}</span>
-                      )}
-                    </div>
-                  )}
-                  {displayPrompt ? (
-                    <div title={displayPrompt} style={{ color: "var(--text-secondary)", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden', lineHeight: 1.4 }}>
-                      {displayPrompt}
-                    </div>
-                  ) : (
-                    <div style={{ color: "var(--text-muted)", fontStyle: "italic" }}>No metadata available</div>
-                  )}
-                  {img.metadata?.steps && (
-                    <div style={{ marginTop: "auto", display: "flex", justifyContent: "space-between", opacity: 0.6, fontSize: "0.7rem", paddingTop: "0.25rem", borderTop: "1px solid var(--border-color)" }}>
-                      <span>{img.metadata.sampler_name || "—"}</span>
-                      <span>CFG {img.metadata.cfg_scale} · {img.metadata.steps}st</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+              />
             );
           }}
         />
-        {hasMoreAssets && (
-          <div style={{ display: "flex", justifyContent: "center", padding: "1rem 0 2rem" }}>
-            <button onClick={() => void loadMoreImages()} disabled={loadingMore} style={{ border: "1px solid var(--border-color)", minWidth: 180 }}>
-              <RefreshCw size={16} className={loadingMore ? "spin" : ""} />
-              {loadingMore ? "Loading..." : `${copy.loadMore} (${images.length}/${assetTotal})`}
-            </button>
+        {loadingMore && (
+          <div style={{ display: "flex", justifyContent: "center", padding: "1.5rem 0 2rem", alignItems: "center", gap: "0.5rem", color: "var(--text-secondary)" }}>
+            <Loader2 className="spin" size={18} />
+            <span>Loading more...</span>
           </div>
         )}
         </>
@@ -3508,18 +3594,7 @@ export function GalleryPage() {
           )
         : null}
 
-      {mobileScanOpen && canUsePortal
-        ? createPortal(
-            <>
-              <div onClick={() => setMobileScanOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.48)", zIndex: 20600 }} />
-              <div className="mklan-mobile-scan-sheet" style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 20601, maxHeight: "82vh", overflowY: "auto", background: "var(--bg-base)", borderTop: "1px solid var(--border-color)", borderRadius: "18px 18px 0 0", boxShadow: "0 -22px 70px rgba(0,0,0,0.5)", padding: "0.9rem 1rem calc(1rem + env(safe-area-inset-bottom))" }}>
-                <div style={{ width: 42, height: 4, borderRadius: 999, background: "var(--border-color)", margin: "0 auto 0.8rem" }} />
-                {renderScanCommandCenter(true)}
-              </div>
-            </>,
-            document.body,
-          )
-        : null}
+
 
       {mobileFiltersOpen && canUsePortal
         ? createPortal(
@@ -3608,7 +3683,6 @@ export function GalleryPage() {
           style={{ position: "fixed", inset: 0, background: "rgba(8,8,10,0.94)", zIndex: 22000, display: "flex", alignItems: isMobile ? "stretch" : "center", justifyContent: "center", padding: isMobile ? 0 : 0, overflowX: "hidden", overflowY: isMobile ? "auto" : "hidden", overscrollBehavior: "contain" }}
         >
           <div style={{ position: "relative", display: "flex", flexDirection: isMobile ? "column" : "row", width: isMobile ? "100vw" : "95vw", height: isMobile ? "auto" : "90vh", minHeight: isMobile ? "100dvh" : undefined, maxHeight: isMobile ? "none" : "90vh", background: "var(--bg-main)", border: isMobile ? "none" : "1px solid var(--border-color)", borderRadius: isMobile ? 0 : "12px", overflow: "hidden", boxShadow: isMobile ? "none" : "0 25px 50px rgba(0,0,0,0.8)" }}>
-            
             {/* Left Image deep zoom stage */}
             <div style={{ flex: isMobile ? "0 0 auto" : 1, height: isMobile ? "clamp(260px, 58dvh, 560px)" : "100%", minHeight: 0, position: "relative" }}>
               <DeepZoomViewer src={zoomImg.fullUrl || zoomImg.url} alt={zoomImg.name} compact={isMobile} />
@@ -3639,7 +3713,7 @@ export function GalleryPage() {
                   <X size={18} />
                 </button>
               ) : null}
-              
+
               {/* Arrow navigators */}
               <button 
                 onClick={() => {
@@ -3666,8 +3740,9 @@ export function GalleryPage() {
             {/* Right Side metadata inspector panel info */}
             <div 
               style={{ 
-                width: isMobile ? "100%" : "350px", 
-                flex: isMobile ? "0 0 auto" : "0 0 350px",
+                width: isMobile ? "100%" : `${inspectorWidth}px`, 
+                flex: isMobile ? "0 0 auto" : `0 0 ${inspectorWidth}px`,
+                position: "relative",
                 minHeight: 0,
                 maxHeight: isMobile ? "none" : "100%",
                 borderLeft: isMobile ? "none" : "1px solid var(--border-color)", 
@@ -3681,6 +3756,24 @@ export function GalleryPage() {
                 height: isMobile ? "auto" : "100%"
               }}
             >
+              {!isMobile && (
+                <div
+                  onMouseDown={startResizing}
+                  onDoubleClick={() => setInspectorWidth(360)}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: "-3px",
+                    width: "6px",
+                    height: "100%",
+                    cursor: "ew-resize",
+                    background: "transparent",
+                    zIndex: 100,
+                    transition: "background 0.2s",
+                  }}
+                  className="inspector-resizer-handle"
+                />
+              )}
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem", position: isMobile ? "sticky" : "static", top: 0, zIndex: 2, background: "var(--bg-secondary)", flex: "0 0 auto" }}>
                 <button 
                   onClick={() => setZoomImg(null)}
@@ -3688,7 +3781,6 @@ export function GalleryPage() {
                     display: "flex",
                     alignItems: "center",
                     gap: "0.3rem",
-                    padding: "0.3rem 0.6rem",
                     background: "rgba(255, 255, 255, 0.05)",
                     border: "1px solid var(--border-color)",
                     color: "var(--text-secondary)",
