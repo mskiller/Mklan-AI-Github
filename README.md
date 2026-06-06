@@ -12,10 +12,10 @@ checks.
 
 ## Current Status
 
-Last verified locally on 2026-05-25:
+Last verified locally on 2026-06-06:
 
-- Backend targeted tests pass: `33 passed` for training, generation, V2 jobs,
-  assets, workflows, and route mounting.
+- Backend targeted tests pass: `64 passed` for training, generation, V2 jobs,
+  assets, workflows, route mounting, cards backend, and media indexer scanning.
 - V2 Phase 1 foundation is prepared for local Docker deployment with dedicated
   `studio_db`, `studio_redis`, and `studio_worker` services. The shared platform
   tables can run on Studio Postgres while legacy module SQLite stores remain
@@ -185,7 +185,8 @@ The Docker Compose file also mounts common Windows drives `C`, `D`, `E`, `F`,
 ```powershell
 # Backend targeted tests
 cd backend
-C:\Python314\python.exe -m pytest tests\test_ai_training_generation.py tests\test_v2_platform.py
+$env:PYTHONPATH="."
+python -m pytest tests
 
 # Frontend build
 cd ..\frontend
