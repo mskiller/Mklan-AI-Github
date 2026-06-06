@@ -81,10 +81,18 @@ async def lifespan(app: FastAPI):
     app.state.v2_jobs = job_manager
     await job_manager.start()
 
+    if hasattr(app.state, "job_manager") and app.state.job_manager is not None:
+        print("MOVIETRACK: Starting movie job_manager", flush=True)
+        await app.state.job_manager.start()
+
+
     try:
         yield
     finally:
         await job_manager.stop()
+        if hasattr(app.state, "job_manager") and app.state.job_manager is not None:
+            await app.state.job_manager.stop()
+
 
 
 # === Unified FastAPI Application ===

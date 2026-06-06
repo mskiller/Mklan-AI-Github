@@ -3,7 +3,7 @@
 Re-exports from the canonical location to provide a stable import path
 for app-level modules (app/database.py).
 """
-from ._wildcard_parser_ref import (
+from ..wildcards.services.wildcard_parser import (
     CATEGORY_RULES,
     COMMENT_RE,
     DANBOORU_PROMPT_CONTEXT,

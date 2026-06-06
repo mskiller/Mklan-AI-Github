@@ -56,158 +56,18 @@ from .config import WILDCARD_DATA_DIR as DATA_DIR
 from .config import WILDCARD_DB as DB_PATH
 from .config import EXPORT_ROOT
 
-WILDCARD_REF_RE = re.compile(r"__([^_\n][^_\n]*%s)__")
-LORA_RE = re.compile(r"<lora:[^>]+>", re.IGNORECASE)
-WEIGHTED_DYNAMIC_RE = re.compile(r"\{\s*\d+(%s:\.\d+)%s::")
-MULTI_SELECT_RE = re.compile(r"\{\s*-%s\d+(%s:-\d+)%s\$\$")
-COMMENT_RE = re.compile(r"^\s*#")
-NEGATIVE_PROMPT_RE = re.compile(r"\b(%s:negative prompt|negative|neg prompt|negatives%s)\s*:", re.IGNORECASE)
-
-CATEGORY_RULES: dict[str, tuple[str, ...]] = {
-    "copyright": (
-        "copyright",
-        "series",
-        "franchise",
-        "source",
-        "source material",
-        "anime title",
-        "game title",
-        "manga",
-        "comic title",
-        "movie",
-        "show",
-        "universe",
-        "pokemon",
-        "genshin",
-        "honkai",
-        "fate",
-        "touhou",
-        "azur lane",
-        "blue archive",
-    ),
-    "characters": (
-        "character",
-        "characters",
-        "character specific",
-        "characterspecific",
-        "female",
-        "females",
-        "person",
-        "people",
-        "personmaker",
-        "card",
-        "actor",
-        "actors",
-        "actress",
-        "celebrity",
-        "celeb",
-        "vtuber",
-        "oc",
-        "original character",
-        "girl",
-        "boy",
-        "woman",
-        "man",
-        "pokemon",
-    ),
-    "pose": (
-        "pose",
-        "posing",
-        "action",
-        "gesture",
-        "stance",
-        "kneeling",
-        "sitting",
-        "standing",
-        "lying",
-        "laying",
-        "reclining",
-        "from behind",
-        "from_below",
-        "cowgirl",
-        "missionary",
-    ),
-    "background": (
-        "background",
-        "location",
-        "scenery",
-        "scene",
-        "environment",
-        "landscape",
-        "architecture",
-        "interior",
-        "outside",
-        "forest",
-        "city",
-        "room",
-        "beach",
-        "street",
-    ),
-    "clothing": (
-        "clothing",
-        "clothes",
-        "outfit",
-        "attire",
-        "dress",
-        "shirt",
-        "skirt",
-        "pants",
-        "uniform",
-        "lingerie",
-        "bikini",
-        "costume",
-        "headwear",
-        "hat",
-        "jewelry",
-        "accessory",
-    ),
-    "quality": (
-        "score_",
-        "masterpiece",
-        "best quality",
-        "quality",
-        "absurdres",
-        "highres",
-        "aesthetic",
-        "intricate details",
-    ),
-    "style": (
-        "style",
-        "artist",
-        "anime",
-        "illustration",
-        "photo",
-        "realistic",
-        "painting",
-        "comic",
-        "toon",
-        "sketch",
-        "lineart",
-    ),
-    "anatomy": (
-        "body",
-        "face",
-        "hair",
-        "eyes",
-        "breast",
-        "lips",
-        "nose",
-        "skin",
-        "height",
-        "build",
-        "anatomy",
-    ),
-    "lighting": (
-        "light",
-        "lighting",
-        "shadow",
-        "hdr",
-        "volumetric",
-        "sunset",
-        "neon",
-        "ambient",
-    ),
-}
+from .services.wildcard_parser import (
+    CATEGORY_RULES,
+    COMMENT_RE,
+    DANBOORU_PROMPT_CONTEXT,
+    LORA_RE,
+    MULTI_SELECT_RE,
+    NEGATIVE_PROMPT_RE,
+    PROMPT_MODES,
+    SDXL_PROMPT_CONTEXT,
+    WEIGHTED_DYNAMIC_RE,
+    WILDCARD_REF_RE,
+)
 
 SCAN_LOCK = threading.Lock()
 SCAN_STATE: dict[str, Any] = {
@@ -218,25 +78,7 @@ SCAN_STATE: dict[str, Any] = {
     "error": None,
 }
 
-PROMPT_MODES = ("danbooru_tags", "sdxl_natural", "mixed", "unknown")
-
-SDXL_PROMPT_CONTEXT = """
-You are helping organize and rewrite SDXL natural-language prompts.
-Use descriptive photographic or illustrative prose rather than Danbooru tag salad.
-Start with the image type or medium, then describe the central subject/action/location, detailed imagery, environment,
-mood/atmosphere, style, and style execution. Prefer concrete camera, lens, depth of field, lighting, composition,
-materials, fabric, texture, foreground/background, and spatial relationships. Avoid contradictions such as "photo, anime style".
-Return reviewable text only; do not mutate wildcard syntax, LoRA syntax, BREAK, or dynamic prompt expressions.
-""".strip()
-
-DANBOORU_PROMPT_CONTEXT = """
-You are helping organize prompts for NoobAI XL and Illustrious XL style models.
-Favor Danbooru/e621-style tag prompting over natural-language sentences. Preserve useful wildcard refs, dynamic prompt syntax,
-weights, LoRA syntax, BREAK, score/rating/source tags, character names, series/copyright tags, artist/style tags, poses,
-clothing, background, lighting, and quality tags. Order positive prompts roughly as: character count, character,
-series/copyright, artist/style, anatomy/details, clothing, pose/action/expression, background/camera/lighting, quality.
-Use concise comma-separated tags unless the task explicitly asks for JSON. Keep all output reviewable; never silently apply edits.
-""".strip()
+# Constants and contexts imported from wildcard_parser
 
 
 
@@ -366,7 +208,7 @@ def split_prompt_tokens(text: str) -> list[str]:
 def clean_tag(value: str) -> str:
     value = value.strip()
     value = re.sub(r"^\(+|\)+$", "", value)
-    value = re.sub(r":[0-9.]+\)%s$", "", value)
+    value = re.sub(r":[0-9.]+\)?$", "", value)
     value = value.strip("{}[]() ")
     value = value.replace("\\(", "(").replace("\\)", ")")
     return value
@@ -390,8 +232,8 @@ def stable_unique(values: Iterable[str], limit: int = 160) -> list[str]:
 
 
 def strip_dynamic_weight(value: str) -> str:
-    value = re.sub(r"^\s*-%s\d+(%s:-\d+)%s\$\$", "", value)
-    value = re.sub(r"^\s*\d+(%s:\.\d+)%s::", "", value)
+    value = re.sub(r"^\s*-?\d+(?:-\d+)?\$\$", "", value)
+    value = re.sub(r"^\s*\d+(?:\.\d+)?::", "", value)
     return value.strip()
 
 
@@ -459,13 +301,13 @@ def prose_phrase_candidates(text: str) -> list[str]:
         if phrase in lowered:
             phrases.append(phrase)
     for pattern in (
-        r"\bwearing\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
-        r"\bholding\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
-        r"\b(%s:standing|sitting|walking)\s+(%s:in|on|through|near)\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
-        r"\bshot on\s+(%s:a|an|the)%s\s*([a-z0-9 _-]{3,48})",
+        r"\bwearing\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
+        r"\bholding\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
+        r"\b(?:standing|sitting|walking)\s+(?:in|on|through|near)\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
+        r"\bshot on\s+(?:a|an|the)?\s*([a-z0-9 _-]{3,48})",
     ):
         for match in re.finditer(pattern, lowered):
-            phrase = re.split(r"\b(%s:with|while|during|and|,|\.|;)\b", match.group(1), maxsplit=1)[0].strip()
+            phrase = re.split(r"\b(?:with|while|during|and|,|\.|;)\b", match.group(1), maxsplit=1)[0].strip()
             words = phrase.split()
             if 1 <= len(words) <= 6:
                 phrases.append(phrase)
@@ -481,7 +323,7 @@ def prompt_tag_candidates(section_text: str, include_refs: bool = True) -> list[
     for option in options:
         text += f", {option}"
     text = re.sub(r"[{}|]", ",", text)
-    text = re.sub(r"\b\d+(%s:\.\d+)%s::", "", text)
+    text = re.sub(r"\b\d+(?:\.\d+)?::", "", text)
     has_commas = "," in text
     chunks = split_prompt_tokens(text) if has_commas else re.split(r"[;\n]+", text)
     tags: list[str] = []
@@ -544,7 +386,7 @@ def detect_categories(text: str, wildcard_path: str, source_name: str = "", tags
             elif " " in normalized_needle:
                 matched = f" {normalized_needle} " in padded
             else:
-                matched = re.search(rf"(%s<![a-z0-9]){re.escape(normalized_needle)}(%s![a-z0-9])", haystack) is not None
+                matched = re.search(rf"(?<![a-z0-9]){re.escape(normalized_needle)}(?![a-z0-9])", haystack) is not None
             if matched:
                 break
         if matched:

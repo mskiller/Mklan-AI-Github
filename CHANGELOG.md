@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-05-25 (V2 Platform Upgrades)
+## 2026-05-25
 
 - Added Training model inventory for SDXL base checkpoints in
   `data/models/images/Base` and VAE files in `data/models/images/VAE`.
@@ -40,18 +40,3 @@
   warnings.
 - Updated `.env.example`, Docker Compose env passthrough, README, and full
   documentation for the caption provider workflow.
-
-## 2026-05-12 (V1 Bootstrap & Studio Features)
-
-- Created a clean public project copy with source code, tests, Docker setup, and
-  documentation.
-- Removed local runtime artifacts from the distributable tree, including
-  databases, model weights, generated media, screenshots, caches, build output,
-  dependency folders, and private environment files.
-- Added sanitized `.env.example`, public `.gitignore`, MIT license, text-only
-  starter wildcard data, and a release verification script.
-- Changed the public Docker default to the lightweight backend image and dry-run
-  training mode. Use `BACKEND_DOCKERFILE=Dockerfile.gpu` only after configuring
-  a local GPU trainer environment.
-- Removed automatic host-drive mounts from the public Compose file. Add local
-  media mounts through an uncommitted `docker-compose.override.yml`.

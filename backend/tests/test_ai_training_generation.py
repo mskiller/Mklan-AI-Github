@@ -662,6 +662,7 @@ def test_generation_wildcard_missing_refs_are_preserved(monkeypatch, tmp_path):
 
 
 def test_generation_clear_jobs_removes_only_requested_terminal_status(monkeypatch, tmp_path):
+    monkeypatch.delenv("STUDIO_DATABASE_URL", raising=False)
     generation = fresh_generation(monkeypatch, tmp_path)
 
     from app.v2.jobs import JobManager, utc_now_iso

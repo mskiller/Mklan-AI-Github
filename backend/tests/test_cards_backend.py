@@ -9,6 +9,7 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setenv("CARDS_DB", str(data_root / "card_creator.db"))
     monkeypatch.setenv("CARDS_SILLYTAVERN_ENABLED", "true")
     monkeypatch.setenv("SILLYTAVERN_PUBLIC_URL", "http://localhost:8011")
+    monkeypatch.setenv("STUDIO_DATABASE_URL", "postgresql+psycopg://mklan_studio:change-me@localhost:5432/mklan_studio")
 
     from app.cards.config import get_settings
 
